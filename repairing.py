@@ -121,6 +121,19 @@ def verify_ai_patch(before,after):
         if np.linalg.norm(cast)>7:raise ValueError('AI 结果出现明显纸色色差，已拦截；请重试或缩小选区')
 
 
+def protected_ink(image):
+    pixels=np.asarray(image.convert('RGB'));gray=cv2.cvtColor(pixels,cv2.COLOR_RGB2GRAY)
+    paper=cv2.morphologyEx(gray,cv2.MORPH_CLOSE,np.ones((21,21),np.uint8))
+    ink=gray<np.maximum(65,paper.astype(float)*.72)
+    red=(pixels[:,:,0].astype(float)-pixels[:,:,1]>20)&(pixels[:,:,0].astype(float)-pixels[:,:,2]>15)
+    return cv2.dilate((ink|red).astype('uint8'),np.ones((9,9),np.uint8))>0
+
+
+def image_data_url(image):
+    buffer=io.BytesIO();image.save(buffer,'PNG')
+    return 'data:image/png;base64,'+base64.b64encode(buffer.getvalue()).decode()
+
+
 def ai_repair(image,region,key,kind='crease',base_url='https://api.openai.com/v1',model='gpt-image-1.5',annotation=None):
     if not key:raise ValueError('请先在 AI 连接中配置 OpenAI API Key')
     x1,y1,x2,y2=region_pixels(region,image.size)
@@ -134,6 +147,8 @@ def ai_repair(image,region,key,kind='crease',base_url='https://api.openai.com/v1
     canvas=Image.new('RGB',canvas_size,colour);canvas.paste(context,offset)
     mask=Image.new('RGBA',canvas_size,(255,255,255,255))
     ImageDraw.Draw(mask).rectangle((x1-box[0]+offset[0],y1-box[1]+offset[1],x2-box[0]-1+offset[0],y2-box[1]-1+offset[1]),fill=(0,0,0,0))
+    protected=protected_ink(canvas)
+    mask_pixels=np.array(mask);mask_pixels[protected,3]=255;mask=Image.fromarray(mask_pixels)
     output_size='1536x1024' if units==(3,2) else '1024x1536' if units==(2,3) else '1024x1024'
     fields={'model':model,'prompt':repair_prompt(kind,annotation),'input_fidelity':'high','quality':'high','size':output_size,'output_format':'png'}
     boundary='repair-'+uuid.uuid4().hex;chunks=[]
@@ -143,13 +158,17 @@ def ai_repair(image,region,key,kind='crease',base_url='https://api.openai.com/v1
         chunks.extend([f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"; filename="{name}.png"\r\nContent-Type: image/png\r\n\r\n'.encode(),buf.getvalue(),b'\r\n'])
     chunks.append(f'--{boundary}--\r\n'.encode())
     request=urllib.request.Request(base_url+'/images/edits',data=b''.join(chunks),headers={'Authorization':'Bearer '+key,'Content-Type':'multipart/form-data; boundary='+boundary})
+    responses=not model.startswith(('gpt-image','grok-imagine','image-'))
+    if responses:
+        body=dict(model=model,input=[dict(role='user',content=[dict(type='input_text',text=repair_prompt(kind,annotation)+' Keep exact canvas framing and dimensions. No padding or borders. Only edit transparent mask pixels; opaque pixels and ink are protected.'),dict(type='input_image',image_url=image_data_url(canvas))])],tools=[dict(type='image_generation',size=output_size,quality='high',input_image_mask=dict(image_url=image_data_url(mask)))],tool_choice=dict(type='image_generation'),store=False)
+        request=urllib.request.Request(base_url+'/responses',data=json.dumps(body).encode(),headers={'Authorization':'Bearer '+key,'Content-Type':'application/json'})
     try:
         with urllib.request.urlopen(request,timeout=300) as response:result=json.load(response)
     except urllib.error.HTTPError as error:
         note='代理未提供图像编辑接口，请检查模型及 /images/edits 支持情况' if error.code in (404,405) else '请检查图像编辑模型、Key、权限及额度'
         raise ValueError(f'AI 服务请求失败（HTTP {error.code}），{note}') from None
     except (OSError,TimeoutError):raise ValueError('AI 服务连接超时或网络不可用，请重试') from None
-    raw=result.get('data',[{}])[0].get('b64_json')
+    raw=next((entry.get('result') for entry in result.get('output',[]) if entry.get('type')=='image_generation_call' and entry.get('result')),None) if responses else result.get('data',[{}])[0].get('b64_json')
     if not raw:raise ValueError('AI 未返回图像，请重试')
     with Image.open(io.BytesIO(base64.b64decode(raw))) as generated:
         if abs((generated.width/generated.height)/(canvas.width/canvas.height)-1)>.01:raise ValueError('AI 返回宽高比例改变，已拒绝拉伸结果，避免字体变形')
@@ -157,7 +176,12 @@ def ai_repair(image,region,key,kind='crease',base_url='https://api.openai.com/v1
     patch=generated.crop((x1-box[0]+offset[0],y1-box[1]+offset[1],x2-box[0]+offset[0],y2-box[1]+offset[1]))
     verify_ai_patch(image.crop((x1,y1,x2,y2)),patch)
     before=np.asarray(image.crop((x1,y1,x2,y2))).astype(float);after=np.asarray(patch).astype(float)
-    alpha=feather(patch.size)[:,:,None]
+    allowed=(np.asarray(mask)[:,:,3]==0)[y1-box[1]+offset[1]:y2-box[1]+offset[1],x1-box[0]+offset[0]:x2-box[0]+offset[0]]
+    # Smooth only the AI correction field, retaining the original paper grain.
+    correction=cv2.GaussianBlur((after-before).astype('float32'),(0,0),2)
+    after=np.clip(before+correction,0,255)
+    distance=cv2.distanceTransform(allowed.astype('uint8'),cv2.DIST_L2,3)
+    alpha=(feather(patch.size)*np.minimum(distance/4,1))[:,:,None]
     out=image.copy();out.paste(Image.fromarray(np.rint(before*(1-alpha)+after*alpha).astype('uint8')),(x1,y1));return out
 
 
@@ -186,6 +210,13 @@ class RepairService:
     def valid_draft(self,item,token):
         draft=self.drafts.get(token)
         return bool(draft and draft['id']==item['id'] and draft['signature']==crop_signature(item) and draft['layers']==self.state(item).get('layers',[]) and draft.get('marks',self.marks(item))==self.marks(item) and (self.folder/draft['file']).exists())
+
+    def pending(self,item):
+        with self.lock:
+            for token,draft in reversed(list(self.drafts.items())):
+                if draft.get('origin')=='single' and self.valid_draft(item,token):
+                    return dict(draft=token,regions=draft['regions'],method=draft['method'],strength=draft.get('strength',.65))
+        return None
 
     def state(self,item):
         state=item.get('repair_state',{})
@@ -241,6 +272,12 @@ class RepairService:
         item=self.find(body['id'])
         if not item.get('confirmed'):raise ValueError('请先确认裁剪，再进入修复')
         signature=crop_signature(item);state=self.state(item)
+        if action=='discard':
+            with self.lock:
+                draft=self.drafts.get(body.get('draft'))
+                if draft and draft['id']!=item['id']:raise ValueError('预览不属于当前作品')
+                self.drafts.pop(body.get('draft'),None);self.save_drafts()
+            return dict(discarded=True)
         if action=='marks':
             if body.get('signature')!=signature:raise ValueError('裁剪已改变，请重新加载后标记')
             regions=body.get('regions')
@@ -268,7 +305,11 @@ class RepairService:
                 token=uuid.uuid4().hex;name=token+'.png';repaired.save(self.folder/name,'PNG');size=list(repaired.size)
                 repaired.close()
             with self.lock:
-                self.drafts[token]=dict(id=item['id'],signature=signature,layers=list(state.get('layers',[])),file=name,regions=regions,marks=self.marks(item));self.save_drafts()
+                origin='batch' if body.get('origin')=='batch' else 'single'
+                if origin=='single':
+                    for old in list(self.drafts):
+                        if self.drafts[old]['id']==item['id'] and self.drafts[old].get('origin')=='single':self.drafts.pop(old)
+                self.drafts[token]=dict(id=item['id'],signature=signature,layers=list(state.get('layers',[])),file=name,regions=regions,marks=self.marks(item),origin=origin,method=method,strength=body.get('strength',.65));self.save_drafts()
             return dict(draft=token,width=size[0],height=size[1],method=method,regions=regions)
         with self.lock:
             target=next(x for x in self.items if x['id']==item['id'])

@@ -84,7 +84,7 @@ class RepairBatch:
         try:
             item=self.service.find(entry['id'])
             if self.fingerprint(item)!=entry['fingerprint']:raise ValueError('作品标记或裁剪已变化，请重新加入')
-            result=self.service.post('preview',dict(id=entry['id'],method='ai',regions=entry['regions']),ai_config=config)
+            result=self.service.post('preview',dict(id=entry['id'],method='ai',regions=entry['regions'],origin='batch'),ai_config=config)
             if self.fingerprint(self.service.find(entry['id']))!=entry['fingerprint']:raise ValueError('处理期间作品或标记发生变化，结果不再适用')
             with self.lock:entry.update(status='ready',draft=result['draft'],width=result['width'],height=result['height']);self.persist()
         except Exception as error:

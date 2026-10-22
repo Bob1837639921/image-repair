@@ -101,6 +101,26 @@ class RepairTests(unittest.TestCase):
             self.assertEqual(len(item['repair_history']),1)
             self.assertTrue(source.exists())
 
+    def test_pending_preview_survives_restart_and_discard(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);source=root/'original.png';Image.new('RGB',(100,240),'#d8cfb4').save(source)
+            item=dict(id='test',file=source.name,points=FULL,rotation=0,settings=DEFAULTS,trim={},confirmed=True,revision=0)
+            def create():return RepairService(root,lambda key:json.loads(json.dumps(item)),lambda x:source,threading.RLock(),lambda:None,[item])
+            service=create();body=dict(id='test',region=[.1,.1,.8,.8],strength=.8)
+            first=service.post('preview',body)
+            service=create();self.assertEqual(service.pending(item)['draft'],first['draft'])
+            self.assertEqual(service.pending(item)['strength'],.8)
+            second=service.post('preview',body)
+            self.assertFalse(service.valid_draft(item,first['draft']))
+            self.assertEqual(service.pending(item)['draft'],second['draft'])
+            service.post('discard',dict(id='test',draft=second['draft']))
+            self.assertIsNone(create().pending(item))
+            batch=service.post('preview',dict(body,origin='batch'))
+            self.assertIsNone(service.pending(item))
+            self.assertTrue(service.valid_draft(item,batch['draft']))
+            single=service.post('preview',body);item['trim']={'left':.01}
+            self.assertIsNone(service.pending(item))
+
     def test_ai_proxy_payload_and_outside_composite(self):
         image=Image.new('RGB',(120,180),'#d8cfb4')
         buffer=io.BytesIO();Image.new('RGB',(100,150),'#d9d0b5').save(buffer,'PNG')
@@ -113,6 +133,26 @@ class RepairTests(unittest.TestCase):
         self.assertIn(b'image-edit-test',request.data);self.assertIn(b'name="mask"',request.data)
         self.assertTrue(np.array_equal(np.asarray(out)[:36],np.asarray(image)[:36]))
         self.assertEqual(out.size,image.size)
+
+    def test_responses_mask_and_exact_protected_pixel_composite(self):
+        import base64
+        from repairing import protected_ink
+        image=Image.new('RGB',(120,180),'#d8cfb4');draw=ImageDraw.Draw(image)
+        draw.line((45,40,70,130),fill=(20,20,20),width=5)
+        draw.rectangle((75,70,90,85),fill=(165,45,40))
+        generated=image.copy();pixels=np.array(generated);pixels[:]=np.clip(pixels.astype(int)+2,0,255);generated=Image.fromarray(pixels)
+        buffer=io.BytesIO();generated.save(buffer,'PNG')
+        response=io.BytesIO(json.dumps({'output':[{'type':'image_generation_call','result':base64.b64encode(buffer.getvalue()).decode()}]}).encode())
+        with patch('urllib.request.urlopen',return_value=response) as call:
+            out=ai_repair(image,[.2,.2,.8,.8],'key',model='gpt-6.1-sol')
+        request=call.call_args.args[0];self.assertTrue(request.full_url.endswith('/responses'))
+        body=json.loads(request.data);self.assertEqual(body['model'],'gpt-6.1-sol')
+        mask=Image.open(io.BytesIO(base64.b64decode(body['tools'][0]['input_image_mask']['image_url'].split(',')[1])))
+        protected=protected_ink(image);self.assertTrue(np.all(np.asarray(mask)[protected,3]==255))
+        before=np.asarray(image);after=np.asarray(out)
+        self.assertTrue(np.array_equal(before[protected],after[protected]))
+        self.assertTrue(np.array_equal(before[:36],after[:36]))
+        self.assertGreater(np.count_nonzero(before!=after),0)
 
     def test_ai_rejects_colour_cast_and_displaced_ink(self):
         image=Image.new('RGB',(160,160),'#d8cfb4');draw=ImageDraw.Draw(image);draw.line((30,50,120,50),fill='black',width=8)

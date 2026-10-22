@@ -1,4 +1,5 @@
 import sys
+import re
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / '.deps' / 'opencv'))
@@ -8,6 +9,18 @@ from PIL import Image, ImageOps, ImageEnhance
 
 DEFAULTS = dict(brightness=1.0, contrast=1.0, sharpness=1.0)
 FULL = [[0, 0], [1, 0], [1, 1], [0, 1]]
+
+
+def artwork_aspect(name, width, height, rotation=0):
+    """Use supplied artwork dimensions only to rank, never stretch, candidates."""
+    match=re.search(r'(\d+(?:\.\d+)?)\s*[×xX*]\s*(\d+(?:\.\d+)?)(?:\s*[×xX*]\s*(\d+))?\s*(?:厘米|cm)',name)
+    if not match:return None
+    first,second=map(float,match.group(1,2))
+    if not first or not second:return None
+    second*=float(match.group(3) or 1)
+    ratio=min(first,second)/max(first,second)
+    if rotation%180:width,height=height,width
+    return ratio if height>=width else 1/ratio
 
 
 def load(path, rotation=0):
@@ -71,8 +84,19 @@ def suggest_trim(image):
         gray=cv2.cvtColor(strip,cv2.COLOR_RGB2GRAY)
         ref_gray=np.median(gray[:,limit+4:],axis=1)
         chroma=np.linalg.norm(colors[:,:,1:]-128,axis=2)
-        protected=(gray[:,:depth]<np.maximum(15,ref_gray*.45)[:,None])&(chroma[:,:depth]<22)
-        if np.mean(protected)>.005:
+        # Judge the entire removed band, not its average darkness. A small
+        # seal or a thin stroke must not be diluted by thousands of blank rows.
+        band=np.ascontiguousarray(oriented[:,:depth])
+        band_gray=cv2.cvtColor(band,cv2.COLOR_RGB2GRAY)
+        band_lab=cv2.cvtColor(band,cv2.COLOR_RGB2LAB).astype(float)
+        paper_gray=float(np.percentile(ref_gray,70))
+        paper_a=float(np.median(reference[:,:,1]))
+        ink=(band_gray<max(30,paper_gray*.65))&(np.linalg.norm(band_lab[:,:,1:]-128,axis=2)<32)
+        red=(band_lab[:,:,1]>max(145,paper_a+12))&(band[:,:,0].astype(float)>band[:,:,1]*1.25)
+        protected=(ink|red).astype('uint8')
+        count,labels,stats,_=cv2.connectedComponentsWithStats(protected,8)
+        significant=any(s[cv2.CC_STAT_AREA]>=max(4,short*.002) for s in stats[1:])
+        if significant:
             evidence[side]=dict(support=round(support,3),pixels=0,protected=True)
             continue
         result[side]=min(.05,depth/axis)
@@ -102,8 +126,22 @@ def render(path, points, rotation=0, settings=None, preview=False, trim=None):
     return out
 
 
-def automatic_process(path, rotation=0):
-    candidates=detect(path,rotation)
+def effective_crop_points(points, width, height, trim=None):
+    """Map the actual rounded output trim back onto the original photograph."""
+    p=validate(points)*[width-1,height-1]
+    output_width=max(2,round(max(np.linalg.norm(p[1]-p[0]),np.linalg.norm(p[2]-p[3])))+1)
+    output_height=max(2,round(max(np.linalg.norm(p[3]-p[0]),np.linalg.norm(p[2]-p[1])))+1)
+    target=np.array([[0,0],[output_width-1,0],[output_width-1,output_height-1],[0,output_height-1]],dtype='float32')
+    matrix=cv2.getPerspectiveTransform(target,p.astype('float32'))
+    t=validate_trim(trim)
+    left=round(output_width*t['left']);right=output_width-round(output_width*t['right'])-1
+    top=round(output_height*t['top']);bottom=output_height-round(output_height*t['bottom'])-1
+    corners=np.array([[[left,top],[right,top],[right,bottom],[left,bottom]]],dtype='float32')
+    return (cv2.perspectiveTransform(corners,matrix)[0]/[width-1,height-1]).tolist()
+
+
+def automatic_process(path, rotation=0, expected_aspect=None):
+    candidates=detect(path,rotation,expected_aspect) if expected_aspect else detect(path,rotation)
     points=candidates[0]['points'] if candidates else FULL
     if candidates:
         candidate=candidates[0]
@@ -112,10 +150,16 @@ def automatic_process(path, rotation=0):
         # A nearly full-frame rectangle without supported internal edges is
         # already framed. Dense grids/text must not create an inset trapezoid.
         if coverage>.85 and supports and sum(v>=2 for v in supports)<2:
-            return dict(points=FULL,trim=validate_trim(),candidates=[dict(points=FULL,method='full-frame')]+candidates[:3],auto_result=dict(needs_review=False,note='画面已基本铺满，保留完整边界'))
+            return dict(points=FULL,trim=validate_trim(),candidates=[dict(points=FULL,method='full-frame')]+candidates[:3],auto_result=dict(needs_review=True,note='纸边证据不足，暂保留完整原图，请检查画心边界'))
     trim=validate_trim()
     notes=[]
     if candidates:
+        with load(path,rotation) as original:
+            guarded=protect_crossing_marks(original,points)
+        points=guarded['points']
+        if guarded['adjusted']:
+            candidates=[{**candidates[0],'points':points,'method':candidates[0]['method']+'+ink-guard'}]+candidates[1:]
+            notes.append('已保留跨纸边笔画，请复核纸边')
         with render(path,points,rotation) as image:
             trim=suggest_trim(image)['trim']
         if candidates[0].get('score',0)<.35:notes.append('画心边界不够明确')
@@ -125,7 +169,123 @@ def automatic_process(path, rotation=0):
     return dict(points=points,trim=trim,candidates=candidates,auto_result=dict(needs_review=bool(notes),note='；'.join(notes) if notes else '自动处理完成'))
 
 
-def refine_native(image, points):
+def protect_crossing_marks(image, points):
+    """Keep connected ink crossing an estimated edge, within a narrow margin.
+
+    Only components connected across the edge count; nearby background and
+    isolated mounting patterns must not pull the crop outwards.
+    """
+    rgb=np.asarray(image);height,width=rgb.shape[:2]
+    p=validate(points).astype(float)*[width-1,height-1]
+    radius=max(24,min(48,round(min(width,height)*.012)))
+    boundaries=[];adjusted=False
+    for side in range(4):
+        start,end=p[side],p[(side+1)%4]
+        tangent=end-start;length=np.linalg.norm(tangent)
+        normal=np.array([-tangent[1],tangent[0]])/length
+        positions=np.linspace(.01,.99,max(64,min(2400,round(length))))
+        offsets=np.arange(-radius,radius+1)
+        coords=start+positions[:,None,None]*tangent+offsets[None,:,None]*normal
+        strip=cv2.remap(rgb,coords[:,:,0].astype('float32'),coords[:,:,1].astype('float32'),cv2.INTER_LINEAR,borderMode=cv2.BORDER_REPLICATE)
+        gray=cv2.cvtColor(strip,cv2.COLOR_RGB2GRAY)
+        lab=cv2.cvtColor(strip,cv2.COLOR_RGB2LAB).astype(float)
+        paper=float(np.percentile(gray[:,radius:],80))
+        dark=(gray<max(35,paper*.55))&(np.linalg.norm(lab[:,:,1:]-128,axis=2)<32)
+        paper_a=float(np.median(lab[:,radius:,1]))
+        red=(lab[:,:,1]>max(132,paper_a+5))&(strip[:,:,0].astype(float)>strip[:,:,1]*1.08)
+        mask=(dark|red).astype('uint8')
+        count,labels,stats,_=cv2.connectedComponentsWithStats(mask,8)
+        shift=0
+        for label in range(1,count):
+            x,y,w,h,area=stats[label]
+            seal=area>=10 and float(np.mean(red[labels==label]))>.65 and x>=radius-24
+            if area<6 or h>len(positions)*.3 or x>=radius or (x+w<=radius+2 and not seal):continue
+            # A component running out of the search strip is uncertain; do
+            # not follow arbitrary background beyond this bounded margin.
+            if x==0:continue
+            shift=min(shift,x-radius-(12 if seal else 3))
+        adjusted|=shift<0
+        boundaries.append((start+normal*shift,end+normal*shift))
+    corners=[]
+    for i in range(4):
+        a,b=boundaries[(i-1)%4];c,d=boundaries[i]
+        matrix=np.column_stack((b-a,-(d-c)))
+        if abs(np.linalg.det(matrix))<1e-6:return dict(points=points,adjusted=False)
+        corners.append(a+(b-a)*np.linalg.solve(matrix,c-a)[0])
+    result=np.clip(np.asarray(corners)/[width-1,height-1],0,1)
+    try:validate(result)
+    except ValueError:return dict(points=points,adjusted=False)
+    return dict(points=result.tolist(),adjusted=bool(adjusted))
+
+
+def refine_surface_boundary(image, points):
+    """Recover a paper/brocade transition, requiring agreement along each edge.
+
+    Work on an analysis copy and reject inward moves across ink or seals.
+    A wider search is used only when a sustained textured-outside / quiet-inside
+    transition exists, never merely because a larger rectangle is possible.
+    """
+    small=image.copy();small.thumbnail((1800,1800))
+    rgb=np.asarray(small);h,w=rgb.shape[:2]
+    gray=cv2.cvtColor(rgb,cv2.COLOR_RGB2GRAY).astype('float32')
+    fine=np.abs(gray-cv2.GaussianBlur(gray,(0,0),1.2))
+    texture=cv2.boxFilter(fine,-1,(7,7))
+    p=validate(points).astype(float)*[w-1,h-1]
+    short=min(np.linalg.norm(np.roll(p,-1,axis=0)-p,axis=1))
+    radius=int(max(12,min(60,short*.14)))
+    lines=[];evidence=[]
+    for side in range(4):
+        start,end=p[side],p[(side+1)%4];tangent=end-start
+        normal=np.array([-tangent[1],tangent[0]])/np.linalg.norm(tangent)
+        positions=np.linspace(.08,.92,360);offsets=np.arange(-radius-20,radius+21)
+        coords=start+positions[:,None,None]*tangent+offsets[None,:,None]*normal
+        valid=(coords[:,:,0]>=0)&(coords[:,:,0]<w-1)&(coords[:,:,1]>=0)&(coords[:,:,1]<h-1)
+        strip=cv2.remap(texture,coords[:,:,0].astype('float32'),coords[:,:,1].astype('float32'),cv2.INTER_LINEAR)
+        colors=cv2.remap(cv2.cvtColor(rgb,cv2.COLOR_RGB2LAB).astype('float32'),coords[:,:,0].astype('float32'),coords[:,:,1].astype('float32'),cv2.INTER_LINEAR)
+        # Evaluate entire straight boundaries, rather than fitting independently
+        # chosen local maxima that can come from unrelated brocade motifs.
+        evidence_map=[]
+        for k in range(20,len(offsets)-20):
+            outer=np.median(strip[:,k-16:k-4],axis=1)
+            inner=np.median(strip[:,k+4:k+16],axis=1)
+            colour=np.linalg.norm((np.mean(colors[:,k-5:k-1],axis=1)-np.mean(colors[:,k+1:k+5],axis=1))*[.6,1,1],axis=1)
+            usable=valid[:,k-16:k+16].all(axis=1)
+            response=colour+12*np.maximum(0,outer-inner)-3*inner
+            usable &= (outer>1.1)&(outer>inner*1.5)&(outer-inner>.45)
+            evidence_map.append(np.where(usable,response,-20))
+        response=np.asarray(evidence_map).T
+        segments=np.array_split(np.arange(len(positions)),18)
+        score_map=np.asarray([np.percentile(response[seg],35,axis=0) for seg in segments])
+        t=np.asarray([positions[seg].mean() for seg in segments])
+        endpoints=np.arange(-radius,radius+1,2)
+        aa,bb=np.meshgrid(endpoints,endpoints);aa=aa.ravel();bb=bb.ravel()
+        locations=aa[:,None]+(bb-aa)[:,None]*t
+        indices=np.clip(np.rint(locations+radius).astype(int),0,2*radius)
+        measured=score_map[np.arange(18)[None,:],indices]
+        scores=np.percentile(measured,25,axis=1)-.018*np.mean(np.abs(locations),axis=1)
+        best=int(np.argmax(scores));shift=slope=0.;support=0
+        if scores[best]>3 and np.mean(measured[best]>3)>=.78:
+            shift=float(aa[best])-1.;slope=float(bb[best]-aa[best]);support=int(np.sum(measured[best]>3))
+        moves=shift+slope*positions
+        swept=valid&(offsets[None,:]>=0)&(offsets[None,:]<=moves[:,None])
+        protected=((colors[:,:,0]<75)|(colors[:,:,1]>150))&swept
+        count,labels,stats,_=cv2.connectedComponentsWithStats(protected.astype('uint8'),8)
+        if any(stat[cv2.CC_STAT_AREA]>=6 for stat in stats[1:]):
+            shift=slope=0.;support=0
+        lines.append((start+normal*shift,end+normal*(shift+slope)))
+        evidence.append(dict(side=side,support=support,shift=round(float(shift),2),slope=round(float(slope),2)))
+    corners=[]
+    for i in range(4):
+        a,b=lines[(i-1)%4];c,d=lines[i];matrix=np.column_stack((b-a,-(d-c)))
+        if abs(np.linalg.det(matrix))<1e-6:return dict(points=points,surface_edges=evidence)
+        corners.append(a+(b-a)*np.linalg.solve(matrix,c-a)[0])
+    result=np.clip(np.asarray(corners)/[w-1,h-1],0,1)
+    try:validate(result)
+    except ValueError:return dict(points=points,surface_edges=evidence)
+    return dict(points=result.tolist(),surface_edges=evidence)
+
+
+def refine_native(image, points, wide=True):
     """Fit continuous edges in narrow source-pixel strips; never resize strips."""
     rgb=np.asarray(image)
     height,width=rgb.shape[:2]
@@ -137,6 +297,8 @@ def refine_native(image, points):
         normal=np.array([-tangent[1],tangent[0]])/max(length,1)
         depth=2*abs(np.dot(pts.mean(axis=0)-(start+end)/2,normal))
         radius=int(min(48,max(10,min(depth*.06,max(width,height)*.008))))
+        tilted_top=wide and side==0 and min(start[1],end[1])<radius and abs(end[1]-start[1])>radius
+        if tilted_top:radius=min(100,max(radius,int(abs(end[1]-start[1]))))
         offsets=np.arange(-radius-4,radius+5,dtype=np.float32)
         positions=np.linspace(.08,.92,max(64,min(2000,int(length/2))))
         base=start+positions[:,None]*tangent
@@ -155,11 +317,14 @@ def refine_native(image, points):
         index=int(np.argmax(scores)); chosen=float(search[index])
         support=float(np.mean(contrast[:,index]>2.5))
         shift=0.; slope=0.
-        if strength[index]>=3 and support>=.65:
+        if (strength[index]>=3 and support>=.65) or tilted_top:
             # Fit separately measured segments, rejecting isolated strokes,
             # fingers and folds rather than following a single strong pixel.
             local=[]
-            nearby=np.where(np.abs(search-chosen)<=5)[0]
+            # An initially tilted edge can cross the true paper boundary at
+            # different offsets in each segment. Search the full bounded strip;
+            # the robust line fit below still requires eight agreeing segments.
+            nearby=np.where(np.abs(search)<=radius)[0] if tilted_top else np.where(np.abs(search-chosen)<=5)[0]
             for indices in np.array_split(np.arange(len(positions)),12):
                 segment=np.percentile(contrast[indices],35,axis=0)
                 best=nearby[np.argmax(segment[nearby]-.08*np.abs(search[nearby]-chosen))]
@@ -175,6 +340,12 @@ def refine_native(image, points):
                         slope,shift=fit
                         # Avoid a systematic inward bias from gradient width.
                         shift-=1.5
+        if tilted_top and shift==0 and slope==0:
+            fallback=refine_native(image,points,wide=False)
+            fp=np.asarray(fallback['points'])*[width-1,height-1]
+            boundaries.append((fp[side],fp[(side+1)%4]))
+            evidence.append(fallback['native_edges'][side])
+            continue
         moves=shift+slope*positions
         swept=(offsets[None,:]>=0)&(offsets[None,:]<=moves[:,None])&valid
         dark=(gray<70)&swept
@@ -194,7 +365,7 @@ def refine_native(image, points):
     return dict(points=normalized.tolist(),native_edges=evidence)
 
 
-def detect(path, rotation=0):
+def detect(path, rotation=0, expected_aspect=None):
     im = load(path, rotation)
     im.thumbnail((1100,1100))
     a = np.asarray(im)
@@ -208,6 +379,66 @@ def detect(path, rotation=0):
     lab=cv2.cvtColor(paper,cv2.COLOR_RGB2LAB).astype(np.float32)
     gray_smooth=cv2.cvtColor(paper,cv2.COLOR_RGB2GRAY)
     texture=cv2.absdiff(gray,gray_smooth)
+    paper_light=cv2.morphologyEx(gray,cv2.MORPH_CLOSE,np.ones((17,17),np.uint8))
+    ink=cv2.dilate((gray<np.maximum(dark_limit,paper_light*.72)).astype('uint8'),np.ones((5,5),np.uint8))>0
+    light_surface=cv2.GaussianBlur(paper_light,(9,9),0).astype(float)
+
+    def tall_surface_quad(contour):
+        # Hands or a fold may attach a spur to an otherwise rectangular mask.
+        # Recover its two long sides from the majority of rows, not the hull.
+        cloud=contour[:,0,:]
+        if np.ptp(cloud[:,1])<h*.6:return None
+        rows=np.unique(cloud[:,1])
+        bounds=[]
+        for yy in rows:
+            xs=cloud[cloud[:,1]==yy,0]
+            bounds.append((yy,xs.min(),xs.max()))
+        bounds=np.asarray(bounds,dtype=float)
+        widths=bounds[:,2]-bounds[:,1]
+        median=np.median(widths)
+        keep=(widths>median*.75)&(widths<median*1.25)
+        if keep.sum()<h*.45 or not w*.10<median<w*.85:return None
+        data=bounds[keep]
+        fits=[]
+        for column in (1,2):
+            good=np.ones(len(data),dtype=bool)
+            for _ in range(4):
+                fit=np.polyfit(data[good,0],data[good,column],1)
+                residual=np.abs(data[:,column]-np.polyval(fit,data[:,0]))
+                good=residual<max(3,float(np.percentile(residual,60)))
+            fits.append(fit)
+        top,bottom=np.percentile(data[:,0],[.5,99.5])
+        return np.array([[np.polyval(fits[0],top),top],[np.polyval(fits[1],top),top],[np.polyval(fits[1],bottom),bottom],[np.polyval(fits[0],bottom),bottom]])
+
+    def fit_paper_sides(contour, quad):
+        # Polygon simplification may choose a corner dent caused by ink or a
+        # fold. Fit each long side from its middle instead of that single dent.
+        pts=quad.astype(float)
+        center=pts.mean(axis=0)
+        pts=pts[np.argsort(np.arctan2(pts[:,1]-center[1],pts[:,0]-center[0]))]
+        pts=np.roll(pts,-np.argmin(pts.sum(axis=1)),axis=0)
+        cloud=contour[:,0,:].astype(float)
+        lines=[]
+        for i in range(4):
+            start,end=pts[i],pts[(i+1)%4]
+            length=np.linalg.norm(end-start);tangent=(end-start)/max(length,1)
+            normal=np.array([-tangent[1],tangent[0]])
+            along=(cloud-start)@tangent;across=(cloud-start)@normal
+            selected=cloud[(along>length*.08)&(along<length*.92)&(np.abs(across)<12)]
+            if len(selected)<8:return pts
+            vx,vy,x,y=cv2.fitLine(selected.astype('float32'),cv2.DIST_HUBER,0,.01,.01).ravel()
+            direction=np.array([vx,vy],dtype=float)
+            if abs(np.dot(direction,tangent))<.99:return pts
+            # Allow one detection pixel outside the paper to protect edge ink.
+            anchor=np.array([x,y])-normal
+            lines.append((anchor,anchor+direction))
+        corners=[]
+        for i in range(4):
+            a,b=lines[(i-1)%4];c,d=lines[i]
+            matrix=np.column_stack((b-a,-(d-c)))
+            if abs(np.linalg.det(matrix))<1e-6:return pts
+            corners.append(a+(b-a)*np.linalg.solve(matrix,c-a)[0])
+        return np.asarray(corners)
 
     def add_quad(pts, method, rectangularity=1.):
         pts=np.asarray(pts,dtype=float).reshape(4,2)
@@ -224,27 +455,81 @@ def detect(path, rotation=0):
         eroded=cv2.erode(mask,np.ones((13,13),np.uint8))
         inner=(mask>0)&(eroded==0)
         outer=(cv2.dilate(mask,np.ones((15,15),np.uint8))>0)&(mask==0)
-        edge_noise=float(np.mean(texture[inner])) if inner.any() else 30
-        outside_noise=float(np.mean(texture[outer])) if outer.any() else 0
+        inner_clean=inner&~ink;outer_clean=outer&~ink
+        edge_noise=float(np.mean(texture[inner_clean])) if inner_clean.any() else 30
+        outside_noise=float(np.mean(texture[outer_clean])) if outer_clean.any() else 0
         uniformity=1-min(edge_noise/22,1)
         contrast=min(max(outside_noise-edge_noise,0)/15,1)
         center_penalty=np.linalg.norm(center/[w,h]-.5)
-        interior_noise=float(np.mean((texture[mask>0]>12)&(gray[mask>0]>85)))
+        clean=(mask>0)&~ink
+        interior_noise=float(np.mean(texture[clean]>12)) if clean.any() else 1.
         vectors=np.roll(pts,-1,axis=0)-pts
         corner_skew=max(abs(float(np.dot(vectors[i],vectors[(i+1)%4])))/(np.linalg.norm(vectors[i])*np.linalg.norm(vectors[(i+1)%4])+1e-6) for i in range(4))
         coverage=max(np.ptp(norm[:,0]),np.ptp(norm[:,1]))
         score=.10*area+.30*uniformity+.15*contrast+.12*rectangularity-.3*center_penalty-1.8*interior_noise+.25*coverage-.4*corner_skew
-        if method=='paper': score+=.12
-        if method=='lines': score+=.10
-        record=dict(points=norm.tolist(),score=round(float(score),3),method=method)
+        if method.startswith('paper'): score+=.12
+        if method=='paper-chroma': score+=.10
+        if method=='paper-layout': score+=.35
+        # Long lines also occur in the backdrop and between text columns.
+        # They are fallback proposals, not evidence deserving a score bonus.
+        # Dense handwriting is legitimate content, not background texture.
+        # Independently reward a colour transition sustained along every side,
+        # so a quiet strip of brocade cannot outrank the complete paper.
+        colour_support=[]
+        boundary_support=[]
+        for side in range(4):
+            start,end=pts[side],pts[(side+1)%4]
+            tangent=end-start;normal=np.array([-tangent[1],tangent[0]])
+            normal/=max(np.linalg.norm(normal),1)
+            base=start+np.linspace(.1,.9,100)[:,None]*tangent
+            inside=base+normal*5;outside=base-normal*5
+            valid=(inside[:,0]>=0)&(inside[:,0]<w)&(inside[:,1]>=0)&(inside[:,1]<h)&(outside[:,0]>=0)&(outside[:,0]<w)&(outside[:,1]>=0)&(outside[:,1]<h)
+            if valid.mean()<.7:
+                colour_support.append(0.);boundary_support.append(0.);continue
+            inn=inside[valid].astype(int);out=outside[valid].astype(int)
+            difference=np.linalg.norm(lab[inn[:,1],inn[:,0],1:]-lab[out[:,1],out[:,0],1:],axis=1)
+            colour_support.append(float(np.percentile(difference,35)))
+            light_difference=np.abs(light_surface[inn[:,1],inn[:,0]]-light_surface[out[:,1],out[:,0]])
+            boundary_support.append(min(1,max(colour_support[-1],float(np.percentile(light_difference,35)))/8))
+        score+=.18*float(np.mean(boundary_support))+.50*min(boundary_support)
+        if expected_aspect and method=='lines':
+            side_lengths=np.linalg.norm(vectors,axis=1)
+            aspect=(side_lengths[0]+side_lengths[2])/max(side_lengths[1]+side_lengths[3],1)
+            # Ignore small perspective deviations. Reject selecting a single
+            # text column or coloured panel within a much larger artwork.
+            # The catalogue dimensions can be wrong (including square works
+            # labelled as narrow scrolls). They may disambiguate incomplete
+            # line proposals, but must never override a measured paper contour.
+            score-=.8*max(0,abs(np.log(aspect/expected_aspect))-.18)
+        record=dict(points=norm.tolist(),score=round(float(score),3),method=method,colour_support=colour_support)
         for i,c in enumerate(candidates):
             if np.mean(np.abs(norm-np.array(c['points'])))<.018:
                 if score>c['score']:candidates[i]=record
                 return
         candidates.append(record)
 
-    noise=((texture>9)&(gray>80)).astype('float32')
-    local_noise=cv2.boxFilter(noise,-1,(25,25))
+    noise=((texture>9)&(gray>80)&~ink).astype('float32')
+    local_noise=cv2.boxFilter(noise,-1,(25,25))/np.maximum(.1,cv2.boxFilter((~ink).astype('float32'),-1,(25,25)))
+    fine_noise=cv2.boxFilter(((texture>3)&~ink).astype('float32'),-1,(25,25))/np.maximum(.1,cv2.boxFilter((~ink).astype('float32'),-1,(25,25)))
+    # White paper and white brocade may share a colour. Their fine surface
+    # texture still differs; exclude ink before measuring that texture.
+    for threshold in (.06,.10,.16,.22,.30,.40):
+        mask=((fine_noise<threshold)&(gray_smooth>100)).astype('uint8')*255
+        mask=cv2.morphologyEx(mask,cv2.MORPH_CLOSE,np.ones((27,27),np.uint8))
+        mask=cv2.morphologyEx(mask,cv2.MORPH_OPEN,np.ones((11,11),np.uint8))
+        contours,_=cv2.findContours(mask,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_NONE)
+        for contour in contours:
+            area=cv2.contourArea(contour)
+            if not .065*w*h<area<.95*w*h:continue
+            rect=cv2.minAreaRect(contour)
+            extent=area/max(rect[1][0]*rect[1][1],1)
+            if extent<.65:continue
+            robust=tall_surface_quad(contour)
+            if robust is not None:add_quad(robust,'paper-surface',min(1,extent+.1))
+            if extent<.88:continue
+            hull=cv2.convexHull(contour)
+            quad=cv2.approxPolyDP(hull,.02*cv2.arcLength(hull,True),True)
+            if len(quad)==4:add_quad(fit_paper_sides(contour,quad[:,0,:]),'paper-surface',extent)
     for threshold in (.035,.065,.10):
         mask=((local_noise<threshold)&(gray_smooth>75)).astype('uint8')*255
         mask=cv2.morphologyEx(mask,cv2.MORPH_CLOSE,np.ones((27,27),np.uint8))
@@ -268,6 +553,27 @@ def detect(path, rotation=0):
             seed=np.median(bright,axis=0)
             if all(np.linalg.norm(seed-s)>9 for s in seeds):seeds.append(seed)
     for seed in seeds:
+        # Paper illumination varies along a hanging scroll. Requiring matching
+        # luminance fragments its contour and can make background lines win.
+        # A narrow chroma-only mask bridges shadows without merging neutral
+        # brocade into warm paper. Keep the original full-colour candidates too.
+        if np.linalg.norm(seed[1:]-128)>2:
+            chroma_distance=np.linalg.norm(lab[:,:,1:]-seed[1:],axis=2)
+            thresholds=(3,4,5) if np.linalg.norm(seed[1:]-128)>6 else (1.5,2,2.5)
+            for threshold in thresholds:
+                mask=((chroma_distance<threshold)&(gray_smooth>75)).astype(np.uint8)*255
+                mask=cv2.morphologyEx(mask,cv2.MORPH_CLOSE,np.ones((17,17),np.uint8))
+                mask=cv2.morphologyEx(mask,cv2.MORPH_OPEN,np.ones((7,7),np.uint8))
+                contours,_=cv2.findContours(mask,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_NONE)
+                for contour in contours:
+                    area=cv2.contourArea(contour)
+                    if not .065*w*h<area<.96*w*h:continue
+                    rect=cv2.minAreaRect(contour)
+                    extent=area/max(rect[1][0]*rect[1][1],1)
+                    if extent<.88:continue
+                    hull=cv2.convexHull(contour)
+                    quad=cv2.approxPolyDP(hull,.015*cv2.arcLength(hull,True),True)
+                    if len(quad)==4:add_quad(fit_paper_sides(contour,quad[:,0,:]),'paper-chroma',extent)
         distance=np.sqrt(((lab-seed)**2*np.array([.45,1.,1.])).sum(axis=2))
         for threshold in (9,16,24):
             mask=(distance<threshold).astype(np.uint8)*255
@@ -328,6 +634,59 @@ def detect(path, rotation=0):
                         yy=(hh[3]*v[1]+hh[4])/(1-hh[3]*v[2])
                         return [v[1]+v[2]*yy,yy]
                     add_quad([intersection(left,t),intersection(right,t),intersection(right,b),intersection(left,b)],'lines')
+    # Multi-panel works can have a strong coloured lower panel and a quieter
+    # title above it. Combine aligned paper proposals before ranking; otherwise
+    # the most colourful panel can win over the complete sheet.
+    layout_proposals=sorted(candidates,key=lambda x:x['score'],reverse=True)[:40]
+    for outer in layout_proposals:
+        if outer['method']=='lines':continue
+        p=np.asarray(outer['points'])*[w-1,h-1]
+        ph=np.ptp(p[:,1]);pw=np.ptp(p[:,0])
+        if ph<h*.65 or pw>ph*.8:continue
+        for inner in layout_proposals:
+            if inner is outer or inner['method']=='lines':continue
+            q=np.asarray(inner['points'])*[w-1,h-1]
+            qh=np.ptp(q[:,1]);qw=np.ptp(q[:,0])
+            if not .75<pw/max(qw,1)<1.33 or ph<qh*1.18:continue
+            if abs(p[:,0].mean()-q[:,0].mean())>w*.025:continue
+            overlap=min(p[:,1].max(),q[:,1].max())-max(p[:,1].min(),q[:,1].min())
+            if overlap<qh*.85:continue
+            merged=p.copy()
+            for side,indices in ((0,(0,3)),(1,(1,2))):
+                top,bottom=indices
+                if abs(q[bottom,1]-q[top,1])<1:continue
+                x=q[top,0]+(p[[top,bottom],1]-q[top,1])*(q[bottom,0]-q[top,0])/(q[bottom,1]-q[top,1])
+                merged[[top,bottom],0]=np.minimum(p[[top,bottom],0],x) if side==0 else np.maximum(p[[top,bottom],0],x)
+            add_quad(merged,'paper-layout')
+    if expected_aspect and expected_aspect>.4:
+        # A photographed pair of couplet sheets has a narrow mounting gutter.
+        # Preserve both sheets when their common outline matches the supplied
+        # combined dimensions; picking the more saturated half loses a work.
+        sheets=[c for c in layout_proposals if c['method'] in ('paper','paper-chroma')]
+        for left in sheets:
+            p=np.asarray(left['points'])*[w-1,h-1]
+            ph=np.ptp(p[:,1]);pw=np.ptp(p[:,0])
+            if ph<h*.5:continue
+            for right in sheets:
+                q=np.asarray(right['points'])*[w-1,h-1]
+                qh=np.ptp(q[:,1]);qw=np.ptp(q[:,0])
+                gap=q[:,0].min()-p[:,0].max()
+                if not -.01*w<gap<.04*w or not .7<pw/max(qw,1)<1.4 or not .85<ph/max(qh,1)<1.18:continue
+                if abs(p[:,1].mean()-q[:,1].mean())>h*.03:continue
+                merged=np.array([p[0],q[1],q[2],p[3]])
+                aspect=(np.linalg.norm(merged[1]-merged[0])+np.linalg.norm(merged[2]-merged[3]))/max(1,np.linalg.norm(merged[3]-merged[0])+np.linalg.norm(merged[2]-merged[1]))
+                if abs(np.log(aspect/expected_aspect))<.25:add_quad(merged,'paper-layout')
+    for record in candidates:
+        p=np.asarray(record['points'])
+        ph=np.ptp(p[:,1]);pw=np.ptp(p[:,0])
+        if ph<.30 or pw>.8*ph:continue
+        for parent in candidates:
+            q=np.asarray(parent['points'])
+            qh=np.ptp(q[:,1]);qw=np.ptp(q[:,0])
+            overlap=min(p[:,1].max(),q[:,1].max())-max(p[:,1].min(),q[:,1].min())
+            if qh>max(.65,ph*1.18) and .75<qw/max(pw,1e-6)<1.33 and abs(p[:,0].mean()-q[:,0].mean())<.025 and overlap>ph*.85:
+                record['score']=round(record['score']-.6,3)
+                break
     candidates.sort(key=lambda x:x['score'],reverse=True)
     # Refine each side against a long strip of paper, not individual ink strokes.
     # Keep this search local so a plausible paper rectangle cannot jump to a
@@ -344,7 +703,10 @@ def detect(path, rotation=0):
             normal/=max(np.linalg.norm(normal),1)
             if np.dot(center-(start+end)/2,normal)<0:normal=-normal
             depth=abs(np.dot(center-(start+end)/2,normal))*2
-            limit=min(80,max(8,depth*.24))
+            # A colour-segmented paper already has a measured boundary.
+            # The broad line-recovery search can otherwise jump into a text
+            # column or an internal fold, throwing away that measurement.
+            limit=5 if record['method'] in ('paper-chroma','paper-surface','paper-layout') else min(12,max(5,depth*.05))
             offsets=np.arange(-min(limit,12),limit+1)
             base=start[None,:]+np.linspace(.12,.88,130)[:,None]*tangent
             scores=[]
@@ -368,8 +730,9 @@ def detect(path, rotation=0):
                 # boundary with a quiet inner strip and textured outer strip.
                 # Use non-dark texture (computed above), so black ink itself
                 # is not mistaken for patterned mounting.
-                inner_noise=float(np.median(local_noise[inn[:,1],inn[:,0]]))
-                outer_noise=float(np.median(local_noise[out[:,1],out[:,0]]))
+                noise_map=fine_noise if record['method']=='paper-surface' else local_noise
+                inner_noise=float(np.median(noise_map[inn[:,1],inn[:,0]]))
+                outer_noise=float(np.median(noise_map[out[:,1],out[:,0]]))
                 texture_step=max(0,outer_noise-inner_noise)
                 inner_colors=lab[inn[:,1],inn[:,0]]
                 outer_colors=lab[out[:,1],out[:,0]]
@@ -395,7 +758,13 @@ def detect(path, rotation=0):
     results=[refine(c) for c in candidates[:4]]
     if results:
         with load(path,rotation) as original:
-            native=refine_native(original,results[0]['points'])
+            coarse_points=results[0]['points']
+            surface=None
+            if results[0]['method'].startswith(('paper-surface','paper-layout')) and min(results[0].get('colour_support',[0]))<2:
+                surface=refine_surface_boundary(original,coarse_points)
+                coarse_points=surface['points']
+            native=refine_native(original,coarse_points)
+            if surface:native['surface_edges']=surface['surface_edges']
         coarse=results[0]
         precise={**coarse,**native,'method':coarse['method']+'+native'}
         # Keep the coarse result available for immediate comparison/recovery.

@@ -13,7 +13,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote
 
-from imaging import load, render, detect, refine_native, validate, validate_trim, suggest_trim, automatic_process, FULL, DEFAULTS
+from imaging import load, render, detect, refine_native, validate, validate_trim, suggest_trim, automatic_process, artwork_aspect, FULL, DEFAULTS
 from repairing import RepairService, crop_signature
 from repair_batch import RepairBatch
 
@@ -67,11 +67,7 @@ def import_image(name, content):
     except Exception:
         dest.unlink(missing_ok=True)
         raise ValueError('图片无法读取，请检查文件')
-    item=dict(id=key,name=name,file=dest.name,width=w,height=h,points=FULL,rotation=0,settings=DEFAULTS.copy(),confirmed=False,candidates=[],revision=0)
-    try:
-        item.update(automatic_process(dest))
-    except Exception as e:
-        item['detection_note']='自动识别未完成：'+str(e)
+    item=dict(id=key,name=name,file=dest.name,width=w,height=h,points=FULL,rotation=0,settings=DEFAULTS.copy(),trim=validate_trim(),confirmed=False,candidates=[],revision=0)
     with LOCK:
         ITEMS.append(item)
         save()
@@ -85,18 +81,18 @@ def process_item(key, ensure=False):
         return item
     candidates=item.get('candidates',[])
     adjusted=not np.allclose(item['points'],candidates[0]['points'] if candidates else FULL,atol=1e-5)
-    if ensure and adjusted:
+    reference=item.get('crop_reference')
+    if not ensure and reference and reference.get('source_file')==item['file'] and reference.get('rotation')==item['rotation']:
+        points=validate(reference['points']).tolist()
+        processed=dict(points=points,trim=validate_trim(),candidates=[dict(points=points,method='visual-review')],auto_result=dict(needs_review=False,method='visual-review',note='已应用逐张复核的纸边，可拖动四角微调'))
+    elif ensure and adjusted:
         with render(source(item),item['points'],item['rotation']) as image:
             trim=item.get('trim') or suggest_trim(image)['trim']
         processed=dict(trim=trim,auto_result=dict(needs_review=False,note='已保留手动裁剪并完成收边'))
     else:
-        processed=automatic_process(source(item),item['rotation'])
-        # Weak evidence must not replace an existing useful crop.
-        existing=not np.allclose(item['points'],FULL,atol=1e-5)
-        if existing and processed['auto_result']['needs_review']:
-            with render(source(item),item['points'],item['rotation']) as image:
-                trim=item.get('trim') or suggest_trim(image)['trim']
-            processed.update(points=item['points'],trim=trim,auto_result=dict(needs_review=True,note='边界不明确，已保留原裁剪'))
+        processed=automatic_process(source(item),item['rotation'],artwork_aspect(item['name'],item['width'],item['height'],item['rotation']))
+        # An explicit crop applies the newly detected geometry, including
+        # reviewable candidates. Keep the warning instead of restoring old points.
     with LOCK:
         target=next(x for x in ITEMS if x['id']==item['id'])
         if target['revision']!=item['revision']:raise ValueError('图片已修改，请重新自动处理')
@@ -128,7 +124,9 @@ def prepare_previews(item):
 def prepare_worker(keys):
     for key in keys:
         try:
-            item=process_item(key,ensure=True)
+            # Background preparation only warms previews; geometry changes
+            # require an explicit processing request from the user.
+            item=find(key)
             prepare_previews(item)
         except Exception as e:
             with LOCK:PREPARE['errors'].append({'id':key,'error':str(e)})
@@ -169,7 +167,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self,*args): pass
 
     def respond(self,value,status=200,mime='application/json; charset=utf-8',cache='no-store'):
-        data=json.dumps(value,ensure_ascii=False).encode() if isinstance(value,(dict,list)) else value
+        data=json.dumps(value,ensure_ascii=False).encode() if value is None or isinstance(value,(dict,list)) else value
         self.send_response(status)
         self.send_header('Content-Type',mime)
         self.send_header('Content-Length',str(len(data)))
@@ -199,6 +197,9 @@ class Handler(BaseHTTPRequestHandler):
             if u.path=='/api/repair/batch-status':return self.respond(BATCH.status())
             if u.path=='/api/repair/batch-candidates':
                 BATCH.status();return self.respond(BATCH.candidates())
+            if u.path.startswith('/api/repair/pending/'):
+                item=find(u.path.rsplit('/',1)[1])
+                return self.respond(REPAIRS.pending(item) if item.get('confirmed') else None)
             if u.path.startswith('/api/repair/info/'):
                 item=find(u.path.rsplit('/',1)[1])
                 if not item.get('confirmed'):raise ValueError('请先确认裁剪')
@@ -249,6 +250,16 @@ class Handler(BaseHTTPRequestHandler):
                     return self.respond(item)
             if u.path=='/api/process':
                 return self.respond(process_item(body['id'],bool(body.get('only_if_needed'))))
+            if u.path=='/api/crop-reference':
+                points=validate(body['points']).tolist()
+                with LOCK:
+                    target=next(x for x in ITEMS if x['id']==body['id'])
+                    if target['confirmed']:raise ValueError('已确认作品不覆盖复核边界')
+                    if target['revision']!=body['revision'] or target['rotation']!=body['rotation'] or target['file']!=body['file']:raise ValueError('作品已修改，请重新复核')
+                    target['crop_reference']=dict(points=points,source_file=target['file'],rotation=target['rotation'],reviewer='assistant')
+                    target['revision']+=1
+                    save()
+                    return self.respond(target)
             if u.path=='/api/trim':
                 item=find(body['id'])
                 with render(source(item),item['points'],item['rotation']) as image:

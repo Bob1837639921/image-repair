@@ -322,7 +322,14 @@ async function repairAction(action){if(repairBusy||!current?.confirmed)return;re
 async function selectRepairAfterBusy(id){repairBusy=false;await selectRepair(id);repairBusy=true}
 $('repairAccept').onclick=()=>repairAction('accept');$('repairUndo').onclick=()=>repairAction('undo');$('repairRedo').onclick=()=>repairAction('redo');
 $('repairComplete').onclick=async()=>{if(repairDraft)return toast('请先采用或放弃修复预览');await repairAction('complete')};
-$('repairDiscard').onclick=()=>{if(repairBusy)return;repairDraft=null;resetRepairResult();fitRepair()};
+async function discardRepairPreview(){
+ if(repairBusy)return false;
+ repairBusy=true;
+ try{if(repairDraft)await api('repair/discard',{id:current.id,draft:repairDraft});repairDraft=null;resetRepairResult();fitRepair();return true}
+ catch(e){toast(e.message);return false}
+ finally{repairBusy=false;aiRepairButton.disabled=!!repairDraft}
+}
+$('repairDiscard').onclick=discardRepairPreview;
 $('repairBefore').onpointerdown=e=>{e.preventDefault();$('repairBefore').setPointerCapture(e.pointerId);showRepairImage({before:true})};
 for(const event of ['pointerup','pointercancel','lostpointercapture'])$('repairBefore').addEventListener(event,()=>showRepairImage());
 $('repairConnect').onclick=async()=>{try{const fields={base_url:$('repairBaseURL').value,model:$('repairModel').value};if($('repairKey').value)fields.key=$('repairKey').value;const result=await api('repair/config',fields);$('repairKey').value='';$('repairConfigState').textContent=result.configured?'连接已保存到本机，重启后自动读取':'地址和模型已保存，尚未配置 Key'}catch(e){toast(e.message)}};
@@ -364,8 +371,34 @@ async function startRepairWith(method){
 $('repairPreview').onclick=()=>startRepairWith('local');
 aiRepairButton.onclick=()=>startRepairWith('ai');
 $('repairResultRetry').onclick=()=>startRepairWith(lastRepairMethod);
-repairRegenerate.onclick=()=>{
+repairRegenerate.onclick=async()=>{
  if(repairBusy)return;
- repairDraft=null;resetRepairResult();
+ if(!await discardRepairPreview())return;
  return startRepairWith(lastRepairMethod);
+};
+
+const selectBeforePendingRestore=selectRepair;
+selectRepair=async function(id){
+ if(repairBusy||repairDraft)return selectBeforePendingRestore(id);
+ await selectBeforePendingRestore(id);
+ const serial=repairResultSerial;
+ let ownsBusy=false;
+ const active=()=>current?.id===id&&workStage==='repair'&&serial===repairResultSerial;
+ if(!active())return;
+ try{
+  const response=await fetch('/api/repair/pending/'+id);
+  if(!response.ok)throw new Error('无法读取待采用的修复预览');
+  const pending=await response.json();
+  if(!pending||!active()||repairBusy||repairDraft)return;
+  repairBusy=true;ownsBusy=true;
+  setRepairResultState('loading','正在恢复待采用的修复预览，不会重新生成');
+  const regions=pending.regions;
+  const [before,image]=await Promise.all([decodedImage(`/api/repair/image/${id}?detail=1&v=${current.revision}`),decodedImage(`/api/repair/image/${id}?detail=1&v=${current.revision}&draft=${pending.draft}`)]);
+  if(!active())return;
+  repairResultRegions=regions;repairResultRegion=[Math.min(...regions.map(x=>x.region[0])),Math.min(...regions.map(x=>x.region[1])),Math.max(...regions.map(x=>x.region[2])),Math.max(...regions.map(x=>x.region[3]))];
+  repairResultFull=false;repairDraft=pending.draft;repairResultBeforeImage=before;repairResultImage=image;
+  lastRepairMethod=pending.method;$('repairMethod').value=pending.method;$('repairStrength').value=pending.strength;$('repairStrength').oninput();
+  paintRepairResult();setRepairResultState('ready');
+ }catch(e){if(active()){resetRepairResult();toast(e.message)}}
+ finally{if(ownsBusy){repairBusy=false;$('repairPreview').disabled=!!repairDraft;aiRepairButton.disabled=!!repairDraft}}
 };

@@ -17,6 +17,72 @@ from imaging import render, validate, detect, refine_native, suggest_trim, valid
 
 
 class GeometryTests(unittest.TestCase):
+    def test_faint_seal_just_outside_edge_is_kept(self):
+        from imaging import protect_crossing_marks
+        im=Image.new('RGB',(600,1000),'#deddd2')
+        draw=ImageDraw.Draw(im)
+        draw.rectangle((150,20,465,980),fill='#e6e4d8')
+        draw.rectangle((445,75,455,102),outline='#b9948c',width=2)
+        result=protect_crossing_marks(im,[[150/599,.02],[440/599,.02],[440/599,.98],[150/599,.98]])
+        self.assertGreater(result['points'][1][0]*599,455)
+
+    def test_reviewed_reference_is_applied_only_to_matching_source(self):
+        import server
+        points=[[.2,.1],[.8,.1],[.8,.9],[.2,.9]]
+        for rotation in (0,90):
+            old=dict(id='reference-test',file='sample.png',name='sample.png',width=600,height=800,points=FULL,rotation=rotation,confirmed=False,revision=0,crop_reference=dict(points=points,rotation=0,source_file='sample.png'))
+            target=dict(old)
+            fallback=dict(points=FULL,trim=validate_trim(),candidates=[],auto_result={})
+            with patch.object(server,'find',return_value=dict(old)),patch.object(server,'source',return_value='unused.png'),patch.object(server,'automatic_process',return_value=fallback) as process,patch.object(server,'ITEMS',[target]),patch.object(server,'save'):
+                result=server.process_item(old['id'])
+            if rotation==0:
+                self.assertTrue(np.allclose(result['points'],points))
+                self.assertFalse(any(result['trim'].values()))
+                process.assert_not_called()
+            else:process.assert_called_once()
+
+    def test_fringe_cannot_remove_small_seal_or_faint_stroke(self):
+        for ink in ('#b64a36','#68614f'):
+            im=Image.new('RGB',(600,1600),'#e7debd')
+            draw=ImageDraw.Draw(im)
+            draw.rectangle((0,0,12,1599),fill='#eeeeee')
+            draw.rectangle((5,700,17,714),fill=ink)
+            self.assertEqual(suggest_trim(im)['trim']['left'],0)
+
+    def test_explicit_crop_applies_reviewable_new_corners(self):
+        import server
+        old=dict(id='crop-test',name='sample.png',width=600,height=800,points=[[.1,.1],[.9,.1],[.9,.9],[.1,.9]],trim={},rotation=0,confirmed=False,revision=0)
+        points=[[.25,.08],[.75,.1],[.78,.94],[.23,.92]]
+        detected=dict(points=points,trim=validate_trim(),candidates=[dict(points=points)],auto_result=dict(needs_review=True,note='部分纸边不清晰'))
+        target=dict(old)
+        with patch.object(server,'find',return_value=dict(old)), patch.object(server,'source',return_value='unused.png'), patch.object(server,'automatic_process',return_value=detected) as process, patch.object(server,'ITEMS',[target]), patch.object(server,'save'):
+            result=server.process_item('crop-test')
+        process.assert_called_once_with('unused.png',0,None)
+        self.assertEqual(result['points'],points)
+        self.assertTrue(result['auto_result']['needs_review'])
+        self.assertEqual(result['before_auto']['points'],old['points'])
+
+    def test_dense_ink_and_lighting_do_not_select_brocade(self):
+        h,w=1100,825
+        lab=np.empty((h,w,3),dtype=np.uint8)
+        yy,xx=np.indices((h,w))
+        lab[:]=[175,128,128]
+        lab[:,:,0]=np.where(((xx//12+yy//20)%2)==0,170,205)
+        lab[30:1070,220:610]=[210,128,128]
+        lab[50:1050,285:540,0]=np.linspace(210,170,1000)[:,None]
+        lab[50:1050,285:540,1:]=[126,151]
+        import cv2
+        image=Image.fromarray(cv2.cvtColor(lab,cv2.COLOR_LAB2RGB))
+        draw=ImageDraw.Draw(image)
+        for x in range(300,530,35):
+            for y in range(65,1040,22):
+                draw.line([(x,y),(x+13,y+8),(x+4,y+15),(x+15,y+18)],fill='#242424',width=3)
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'dense.png';image.save(path)
+            points=np.asarray(detect(path)[0]['points'])*[w-1,h-1]
+        expected=np.array([[285,50],[539,50],[539,1049],[285,1049]])
+        self.assertLess(np.max(np.linalg.norm(points-expected,axis=1)),12)
+
     def test_already_framed_weak_inset_keeps_full_image(self):
         candidate=dict(points=[[0,0],[.895,0],[1,1],[0,1]],edge_support=[0,0,.6,0])
         with patch('imaging.detect',return_value=[candidate]):
@@ -148,12 +214,25 @@ class GeometryTests(unittest.TestCase):
                 ImageDraw.Draw(source).polygon([(140,70),(460,100),(490,730),(110,700)],fill='#e3d6ad')
                 source.save(buf,'PNG')
                 automatic=post('import?name=uncropped.png',buf.getvalue(),True)
-                self.assertTrue(automatic['candidates'])
-                self.assertEqual(automatic['points'],automatic['candidates'][0]['points'])
+                self.assertEqual(automatic['candidates'],[])
+                self.assertEqual(automatic['points'],FULL)
                 self.assertFalse(automatic['confirmed'])
-                self.assertIn('auto_result',automatic)
-                self.assertIn('trim',automatic)
+                self.assertNotIn('auto_result',automatic)
+                self.assertFalse(any(automatic['trim'].values()))
+                post('prepare',{})
+                for _ in range(100):
+                    prepared=json.load(urllib.request.urlopen(base+'/api/prepare-job'))
+                    if not prepared['running']:break
+                    time.sleep(.05)
+                self.assertFalse(prepared['running'])
+                self.assertFalse(prepared['errors'])
+                unchanged=next(x for x in json.load(urllib.request.urlopen(base+'/api/items')) if x['id']==automatic['id'])
+                self.assertEqual(unchanged,automatic, 'background preparation must not modify imported geometry')
+                with Image.open(io.BytesIO(urllib.request.urlopen(base+'/api/image/'+automatic['id']+'?mode=result').read())) as preview:
+                    self.assertEqual(preview.size,(600,800))
                 processed=post('process',{'id':automatic['id']})
+                self.assertTrue(processed['candidates'])
+                self.assertNotEqual(processed['points'],FULL)
                 self.assertEqual(processed['points'],processed['candidates'][0]['points'])
                 self.assertEqual(processed['before_auto']['points'],automatic['points'])
                 self.assertIn('needs_review',processed['auto_result'])
@@ -170,7 +249,7 @@ class GeometryTests(unittest.TestCase):
                 preserved=post('process',{'id':item['id'],'only_if_needed':True})
                 self.assertTrue(np.allclose(preserved['points'],[[.1,.05],[.9,.05],[.9,.95],[.1,.95]]))
                 weak=post('process',{'id':item['id']})
-                self.assertEqual(weak['points'],preserved['points'])
+                self.assertEqual(weak['points'],FULL)
                 self.assertTrue(weak['auto_result']['needs_review'])
                 original_backup=weak['before_auto']
                 repeated=post('process',{'id':item['id']})

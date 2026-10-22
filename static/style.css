@@ -18,6 +18,18 @@ header{height:48px;display:flex;align-items:center;gap:10px;padding:0 16px;backg
 .header-imports #importTop{margin-left:0}
 .header-imports #importFolder{background:transparent;border-color:transparent;font-size:12px}
 .header-imports button:hover{background:#edf2eb;border-color:#d5e0d3}
+.import-progress{position:fixed;z-index:100;left:50%;bottom:68px;transform:translateX(-50%);width:min(440px,calc(100vw - 32px));padding:18px 20px;background:var(--paper);border:1px solid #c8d9ce;border-radius:12px;box-shadow:0 8px 32px #233c3526;pointer-events:none}
+.import-progress-heading{display:flex;align-items:center;gap:10px;font-size:13px}
+.crop-backdrop{position:fixed;inset:0;z-index:90;background:#233c3538;cursor:wait;touch-action:none}
+.import-spinner{width:18px;height:18px;flex:none;border:2px solid #dce8df;border-top-color:var(--accent);border-radius:50%;animation:import-spin .8s linear infinite}
+.import-filename{margin:12px 0 10px;color:var(--muted);font-size:12px;overflow-wrap:anywhere;max-height:48px;overflow:hidden}
+.import-progress progress{display:block;width:100%;height:7px;border:0;border-radius:8px;overflow:hidden;accent-color:var(--accent);background:#e5ede7}
+.import-progress progress::-webkit-progress-bar{background:#e5ede7;border-radius:8px}
+.import-progress progress::-webkit-progress-value{background:var(--accent);border-radius:8px;transition:width .2s}
+.import-progress progress::-moz-progress-bar{background:var(--accent);border-radius:8px}
+.import-progress p{margin:10px 0 0;color:var(--muted);font-size:11px;line-height:1.6}
+@keyframes import-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.import-spinner{animation-duration:2s}.import-progress progress::-webkit-progress-value{transition:none}}
 header button{padding:5px 13px;font-size:12px}
 #exportCount{margin-left:8px;border-radius:4px;background:#ffffff22;padding:1px 6px;font-size:11px}
 main{display:grid;grid-template-columns:280px minmax(0,1fr) 240px;height:calc(100dvh - 48px);min-height:0}
@@ -264,3 +276,6 @@ body.dragging main{outline:3px dashed #5d8e6a;outline-offset:-6px}
 #repairBatchChoices label{display:flex;align-items:center;gap:9px;padding:9px 4px;margin:0;border-bottom:1px solid var(--line);cursor:pointer}
 #repairBatchChoices input{flex:0 0 16px;width:16px;height:16px;accent-color:var(--accent)}
 #repairBatchChoices span{overflow-wrap:anywhere}
+
+.crop-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px}
+.crop-actions button{width:100%;min-width:0;margin:0;padding:8px 4px;font-size:12px;white-space:nowrap}

@@ -61,7 +61,7 @@ async function select(id){
   drawStatus();for(const key of ['brightness','contrast','sharpness']){$(key).value=current.settings[key];$(key+'Value').textContent=Number(current.settings[key]).toFixed(2)}
   drawCandidates();if(typeof syncTrim==='function')syncTrim();
   const loading=loadOriginal();if(compare)preview();await loading;if(serial===selectionSerial)prefetchNeighbors();
- }catch(e){if(serial===selectionSerial){toast('自动处理未完成：'+e.message);view.classList.remove('loading-image');view.setAttribute('aria-busy','false')}}
+ }catch(e){if(serial===selectionSerial){toast('图片加载未完成：'+e.message);view.classList.remove('loading-image');view.setAttribute('aria-busy','false')}}
 }
 function fit(){if(!current||!$('original').naturalWidth)return;const view=$('originalPane').querySelector('.viewport');const im=$('original');const dims=sourceDimensions();const scale=$('zoom').value==='fit'?Math.max(.01,Math.min((view.clientWidth-26)/dims[0],(view.clientHeight-26)/dims[1])):Number($('zoom').value);$('imageWrap').style.width=dims[0]*scale+'px';$('imageWrap').style.height=dims[1]*scale+'px';drawQuad()}
 function fitResult(){const im=$('result');if(!im.naturalWidth)return;const view=$('resultPane').querySelector('.viewport');const scale=Math.min((view.clientWidth-26)/im.naturalWidth,(view.clientHeight-26)/im.naturalHeight);if(scale>0){im.style.width=im.naturalWidth*scale+'px';im.style.height=im.naturalHeight*scale+'px'}}
@@ -69,7 +69,41 @@ function drawQuad(){if(!current)return;const svg=$('overlay');svg.setAttribute('
 async function preview(){if(!current)return;const serial=++previewSerial,id=current.id;$('result').style.visibility='hidden';await saveChain.catch(()=>{});if(serial!==previewSerial||current?.id!==id)return;try{const image=await decodedImage('/api/image/'+id+'?mode=result&v='+current.revision);if(serial!==previewSerial||current?.id!==id)return;image.id='result';image.onload=fitResult;$('result').replaceWith(image);fitResult();$('result').style.visibility='visible'}catch(e){if(serial===previewSerial)toast('效果预览加载失败，请重试')}}
 function drawCandidates(){const select=$('candidates');select.replaceChildren();(current?.candidates||[]).forEach((x,i)=>{const o=document.createElement('option');o.value=i;const label=x.method==='before-native'?'精定位前':x.method?.endsWith('native')?'原图精定位':i===1&&current.candidates[0]?.method?.endsWith('native')?'粗定位备选':'候选边界';o.textContent=`${label} ${i+1}${i===0?' · 优先建议':''}`;select.append(o)});select.hidden=!current?.candidates?.length}
 async function detectOne(){if(!current||busy)return;busy=true;markHistory();$('detect').disabled=true;try{await saveChain;const result=await api('detect',{id:current.id});replace(result);drawCandidates();drawQuad();drawStatus();if(compare)preview();toast(result.candidates.length?'已找到候选边界，请检查后确认':'没有找到可靠边界，请手动拖动四角')}catch(e){toast(e.message)}finally{busy=false;$('detect').disabled=false}}
-async function importFiles(files){if(busy)return toast('请等待当前操作完成');busy=true;const accepted=[...files].filter(f=>/\.(jpe?g|png|tiff?|bmp|webp)$/i.test(f.name));let failed=0,detected=0;for(let i=0;i<accepted.length;i++){const f=accepted[i];$('hint').textContent=`正在导入并自动处理 ${i+1} / ${accepted.length}：${f.name}`;try{const r=await fetch('/api/import?name='+encodeURIComponent(f.name),{method:'POST',headers:{'X-App-Token':window.APP_TOKEN},body:f});const item=await r.json();if(!r.ok)throw Error(item.error);if(item.candidates?.length)detected++;replace(item);if(!current)await select(item.id)}catch(e){failed++;toast(f.name+'：'+e.message)}}busy=false;$('hint').textContent=`导入 ${accepted.length-failed} 张，${detected} 张已完成自动裁剪${failed?'，失败 '+failed+' 张':''}。识别、精定位和去残边已自动执行。`;toast($('hint').textContent)}
+function drawImportProgress(done,total,name,failed){
+ $('importStatus').textContent=`正在导入 · ${done} / ${total} 张已完成`;
+ $('importFilename').textContent=name;
+ $('importMeter').max=total;$('importMeter').value=done;
+ $('importDetail').textContent=`正在保存原图并准备预览，请稍候${failed?' · 失败 '+failed+' 张':''}`;
+}
+async function importFiles(files){
+ if(busy)return toast('请等待当前操作完成');
+ $('cropProgress').hidden=true;
+ const accepted=[...files].filter(f=>/\.(jpe?g|png|tiff?|bmp|webp)$/i.test(f.name));
+ if(!accepted.length)return toast('没有可导入的图片，支持 JPG / PNG / TIFF / BMP / WEBP');
+ busy=true;let failed=0;
+ const controls=['importTop','importFolder','importEmpty'].map($);
+ const disabled=controls.map(button=>button.disabled);
+ try{
+  drawImportProgress(0,accepted.length,accepted[0].name,0);
+  $('importProgress').hidden=false;$('importProgress').setAttribute('aria-busy','true');
+  controls.forEach(button=>button.disabled=true);
+  for(let i=0;i<accepted.length;i++){
+   const f=accepted[i];drawImportProgress(i,accepted.length,f.name,failed);
+   $('hint').textContent=`正在导入 ${i+1} / ${accepted.length}：${f.name}`;
+   try{
+    const r=await fetch('/api/import?name='+encodeURIComponent(f.name),{method:'POST',headers:{'X-App-Token':window.APP_TOKEN},body:f});
+    const item=await r.json();if(!r.ok)throw Error(item.error);
+    replace(item);if(!current)await select(item.id);
+   }catch(e){failed++;toast(f.name+'：'+e.message)}
+   drawImportProgress(i+1,accepted.length,f.name,failed);
+  }
+  $('hint').textContent=`导入 ${accepted.length-failed} 张${failed?'，失败 '+failed+' 张':''}。已保留完整原图，点击“当前裁剪”或“全部裁剪”开始处理。`;
+  toast($('hint').textContent);
+ }finally{
+  busy=false;$('importProgress').hidden=true;$('importProgress').setAttribute('aria-busy','false');
+  controls.forEach((button,i)=>button.disabled=disabled[i]);
+ }
+}
 for(const id of ['importTop','importFiles','importEmpty'])$(id).onclick=()=>$('fileInput').click();$('importFolder').onclick=()=>$('folderInput').click();for(const id of ['fileInput','folderInput'])$(id).onchange=e=>{importFiles(e.target.files);e.target.value=''};
 document.addEventListener('dragover',e=>{e.preventDefault();document.body.classList.add('dragging')});document.addEventListener('dragleave',e=>{if(!e.relatedTarget)document.body.classList.remove('dragging')});document.addEventListener('drop',e=>{e.preventDefault();document.body.classList.remove('dragging');importFiles(e.dataTransfer.files)});
 $('search').oninput=drawList;$('filter').onchange=drawList;$('original').onload=fit;new ResizeObserver(fit).observe($('originalPane'));$('zoom').onchange=fit;
@@ -135,12 +169,65 @@ settingsPanel.append(advanced);
 advanced.append(refineButton,$('candidates'),precision,trimPanel,$('rotate'),$('full'));
 trimPanel.open=false;
 const autoState=document.createElement('p');autoState.id='autoState';autoState.className='auto-state';primaryActions.after(autoState);
-function drawAutoState(){autoState.textContent=current?.auto_result?.needs_review?'建议检查：'+current.auto_result.note:current?.auto_result?'自动处理完成':''}
+function drawAutoState(){autoState.textContent=current?.auto_result?.needs_review?'建议检查：'+current.auto_result.note:current?.auto_result?(current.auto_result.note||'裁剪完成'):current?'已保留原图，点击“当前裁剪”或“全部裁剪”开始处理':''}
 const previousDrawStatus=drawStatus;drawStatus=function(){previousDrawStatus();drawAutoState()};
-$('detect').textContent='重新自动处理';advanced.append($('detect'));
-$('detect').onclick=async()=>{if(!current||busy)return;busy=true;const id=current.id;markHistory();$('detect').disabled=true;$('detect').textContent='处理中…';try{await saveChain;const result=await api('process',{id});replace(result);if(current?.id===id){drawCandidates();syncTrim();drawQuad();drawStatus();showTrimPreview()}toast(result.auto_result.needs_review?'已自动处理，部分边界建议检查':'自动处理完成')}catch(e){toast(e.message)}finally{busy=false;$('detect').disabled=false;$('detect').textContent='重新自动处理'}};
-$('batchDetect').textContent='批量自动处理待检查图片';
-$('batchDetect').onclick=async()=>{if(busy)return;busy=true;const pending=items.filter(x=>!x.confirmed);try{await saveChain;for(let i=0;i<pending.length;i++){$('hint').textContent=`自动处理 ${i+1} / ${pending.length}`;replace(await api('process',{id:pending[i].id}))}if(current){drawCandidates();syncTrim();drawQuad();drawStatus();showTrimPreview()}toast('批量自动处理完成')}catch(e){toast(e.message)}finally{busy=false;$('hint').textContent='识别、精定位和去残边已合并，异常边界会提示检查。'}};
+$('detect').textContent='当前裁剪';$('detect').classList.add('primary');$('detect').title='识别当前图片的画心边界并裁剪';
+$('detect').onclick=async()=>{if(!current||busy)return;$('cropProgress').hidden=true;busy=true;const id=current.id;markHistory();$('detect').disabled=true;$('batchDetect').disabled=true;$('detect').textContent='裁剪中…';try{await saveChain;const result=await api('process',{id});replace(result);if(current?.id===id){drawCandidates();syncTrim();drawQuad();drawStatus();if(compare)preview()}toast(result.auto_result.needs_review?'已重新定位选框，请检查：'+result.auto_result.note:result.auto_result.method==='visual-review'?result.auto_result.note:'已重新定位选框，可拖动四角微调')}catch(e){toast(e.message)}finally{busy=false;$('detect').disabled=false;$('batchDetect').disabled=false;$('detect').textContent='当前裁剪'}};
+function lockCropWorkspace(){
+ const regions=[...document.querySelectorAll('body > header, body > main')];
+ const previous=regions.map(region=>region.inert),focus=document.activeElement;
+ const block=event=>{event.preventDefault();event.stopImmediatePropagation()};
+ const events=['keydown','keyup','dragover','drop','wheel'];
+ regions.forEach(region=>region.inert=true);
+ $('cropBackdrop').hidden=false;
+ events.forEach(type=>window.addEventListener(type,block,{capture:true,passive:false}));
+ return ()=>{
+  events.forEach(type=>window.removeEventListener(type,block,true));
+  regions.forEach((region,i)=>region.inert=previous[i]);
+  $('cropBackdrop').hidden=true;
+  if(focus?.isConnected)focus.focus({preventScroll:true});
+ };
+}
+function drawCropProgress(done,total,item){
+ $('cropStatus').textContent=`正在裁剪第 ${done+1} 张 / 共 ${total} 张`;
+ $('cropFilename').textContent=item.name;
+ $('cropMeter').max=total;$('cropMeter').value=done;
+ $('cropDetail').textContent=`已完成 ${done} 张 · ${Math.round(done/total*100)}% · 正在重新识别四角并裁剪`;
+}
+
+$('batchDetect').onclick=async()=>{
+ if(busy)return;
+ const pending=items.filter(x=>!x.confirmed);
+ if(!pending.length)return toast('没有待裁剪的图片，已确认作品已保留');
+ const unlock=lockCropWorkspace();
+ busy=true;$('detect').disabled=true;$('batchDetect').disabled=true;
+ let completed=0;
+ drawCropProgress(0,pending.length,pending[0]);
+ $('cropSpinner').hidden=false;$('cropProgress').hidden=false;$('cropProgress').setAttribute('aria-busy','true');
+ try{
+  await saveChain;
+  for(let i=0;i<pending.length;i++){
+   drawCropProgress(i,pending.length,pending[i]);
+   $('batchDetect').textContent=`裁剪 ${i+1}/${pending.length}`;
+   $('hint').textContent=`全部裁剪 ${i+1} / ${pending.length}`;
+   if(current?.id===pending[i].id)markHistory();
+   replace(await api('process',{id:pending[i].id}));
+   completed=i+1;$('cropMeter').value=completed;
+   if(current?.id===pending[i].id){drawCandidates();syncTrim();drawQuad();drawStatus();if(compare)preview()}
+  }
+  $('cropStatus').textContent=`裁剪完成 · ${completed} / ${pending.length} 张`;
+  $('cropDetail').textContent='100% · 请检查文字、印章和画心边界。';
+  toast(`已完成 ${pending.length} 张裁剪，请检查边界`);
+ }catch(e){
+  $('cropStatus').textContent=`裁剪中断 · 已完成 ${completed} / ${pending.length} 张`;
+  $('cropDetail').textContent='失败原因：'+e.message;toast(`裁剪中断，已完成 ${completed} / ${pending.length} 张：${e.message}`);
+ }finally{
+  $('cropSpinner').hidden=true;$('cropProgress').hidden=true;$('cropProgress').setAttribute('aria-busy','false');
+  busy=false;$('detect').disabled=false;$('batchDetect').disabled=false;$('batchDetect').textContent='全部裁剪';
+  unlock();
+  $('hint').textContent='裁剪结果请检查文字、印章和边界。';
+ }
+};
 const restoreFull=$('full').onclick;$('full').onclick=()=>{if(window.confirm('重置为整张照片？之后需要重新识别或调整全部四角。'))restoreFull()};
 // Compact controls with one prominent mode switch and a single primary action.
 const tabs=document.querySelector('.tabs');tabs.setAttribute('role','group');tabs.setAttribute('aria-label','查看模式');
@@ -150,8 +237,8 @@ const modeLabel=document.createElement('div');modeLabel.className='panel-caption
 const appearance=document.createElement('details');appearance.className='advanced-controls';appearance.innerHTML='<summary>画面微调</summary>';
 const appearanceBlock=$('brightness').closest('.block');appearance.append(appearanceBlock);settingsPanel.insertBefore(appearance,advanced);
 const exportOptions=document.createElement('details');exportOptions.className='advanced-controls';exportOptions.innerHTML='<summary>导出选项</summary>';exportOptions.append($('format').closest('label'));settingsPanel.append(exportOptions);
-advanced.append($('batchDetect'));$('batchDetect').textContent='重新处理未确认图片';
-const stateBlock=document.createElement('div');stateBlock.className='processing-state';stateBlock.append(autoState);mainToolbar.after(stateBlock);
+$('batchDetect').textContent='全部裁剪';$('batchDetect').title='裁剪全部未确认图片，保留已确认作品';$('batchDetect').classList.remove('text-button');
+const stateBlock=document.createElement('div');stateBlock.className='processing-state';const cropActions=document.createElement('div');cropActions.className='crop-actions';cropActions.append($('batchDetect'),$('detect'));stateBlock.append(cropActions,autoState);mainToolbar.after(stateBlock);
 const finalActions=document.createElement('div');finalActions.className='final-actions';finalActions.append($('confirm'),$('openExport'),$('progress'));settingsPanel.append(finalActions);
 primaryActions.remove();
 for(const block of [...settingsPanel.querySelectorAll(':scope > .block')])block.remove();
