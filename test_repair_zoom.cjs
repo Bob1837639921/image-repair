@@ -1,0 +1,22 @@
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+const source=fs.readFileSync(__dirname+'/static/repair.js','utf8'),nodes=new Map();
+const view={clientWidth:700,clientHeight:600,scrollLeft:0,scrollTop:0,getBoundingClientRect:()=>({left:0,top:0})};
+const wrap={style:{},getBoundingClientRect(){const width=parseFloat(this.style.width)||500,height=parseFloat(this.style.height)||1000;return {left:Math.max(12,(700-width)/2)-view.scrollLeft,top:12-view.scrollTop,width,height}}};
+nodes.set('repairViewport',view);nodes.set('repairWrap',wrap);nodes.set('repairImage',{naturalWidth:500});nodes.set('repairEmpty',{hidden:true});
+nodes.set('repairZoom',{value:'fit',append(option){nodes.set(option.id,option)}});
+function $(id){if(!nodes.has(id))nodes.set(id,{style:{}});return nodes.get(id)}
+const context=vm.createContext({$,current:{confirmed:true},repairSize:[500,1000],repairSelection:[.4,.2,.5,.3],document:{createElement:()=>({})}});
+vm.runInContext(source.slice(source.indexOf('function repairCurrentScale'),source.indexOf('async function showRepairImage')),context);
+context.repairSelectionKind='bump';
+vm.runInContext('fitRepair()',context);assert.equal(wrap.style.height,'574px');
+vm.runInContext('zoomRepair(4,[350,300])',context);assert.equal(wrap.style.width,'2000px');assert.equal(wrap.style.height,'4000px');assert.equal($('repairZoomPercent').textContent,'400%');
+assert.equal($('repairSelection').style.left,'40%');assert.ok(Math.abs(parseFloat($('repairSelection').style.width)-10)<1e-8);
+assert.equal($('repairSelection').className,'bump');
+context.repairSelectionKind='crease';vm.runInContext('paintRepairSelection()',context);assert.equal($('repairSelection').className,'crease');
+context.repairSelectionKind=null;vm.runInContext('paintRepairSelection()',context);assert.equal($('repairSelection').className,'pending');
+const before=wrap.getBoundingClientRect(),pixel=[(350-before.left)/before.width,(300-before.top)/before.height];
+vm.runInContext('zoomRepair(8,[350,300])',context);const after=wrap.getBoundingClientRect();
+assert.ok(Math.abs(after.left+pixel[0]*after.width-350)<1e-7);assert.ok(Math.abs(after.top+pixel[1]*after.height-300)<1e-7);
+vm.runInContext('zoomRepair(100)',context);assert.equal(wrap.style.width,'4000px');
+vm.runInContext('zoomRepair("fit")',context);assert.equal(wrap.style.height,'574px');
+console.log('PASS: repair native-pixel zoom, 800% limit, pointer anchor and selection coordinates');

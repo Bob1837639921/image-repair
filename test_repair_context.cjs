@@ -1,0 +1,19 @@
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+const source=fs.readFileSync(__dirname+'/static/repair.js','utf8'),nodes=new Map(),saves=[];
+function $(id){if(!nodes.has(id))nodes.set(id,{});return nodes.get(id)}
+const context=vm.createContext({$,repairBusy:false,repairDraft:null,repairMarks:[{id:'first',kind:'crease',region:[.1,.2,.3,.4]},{id:'second',kind:'bump',region:[.5,.5,.7,.8]}],repairActiveMark:'first',repairSelection:[.1,.2,.3,.4],repairSelectionKind:'crease',repairKindPicker:{hidden:false},paintRepairSelection(){},paintRepairMarks(){},saveRepairMarks(){saves.push(JSON.parse(JSON.stringify(context.repairMarks)))}});
+context.repairSize=[1000,2000];context.repairMarkSignature='test-signature';context.toast=()=>{};
+vm.runInContext(source.slice(source.indexOf('function chooseRepairKind('),source.indexOf("$('repairChooseCrease').onclick")),context);
+vm.runInContext(source.slice(source.indexOf('function deleteRepairMark('),source.indexOf('function showRepairContextMenu(')),context);
+context.chooseRepairKind('bump');
+assert.equal(context.repairMarks.length,2);
+assert.equal(context.repairMarks[0].kind,'bump');
+assert.deepEqual(Array.from(context.repairMarks[0].region),[.1,.2,.3,.4]);
+assert.equal(saves.at(-1)[0].id,'first');
+context.deleteRepairMark('first');
+assert.equal(context.repairSelection,null);assert.equal(context.repairActiveMark,null);
+assert.deepEqual(Array.from(context.repairMarks,x=>x.id),['second']);assert.equal(saves.at(-1).length,1);
+context.repairBusy=true;context.deleteRepairMark('second');assert.equal(context.repairMarks.length,1);
+context.repairBusy=false;context.repairSelection=[.2,.2,.3,.3];context.deleteRepairMark(null);
+assert.equal(context.repairSelection,null);assert.equal(context.repairMarks.length,1);
+console.log('PASS: type change preserves region; deletion persists only target; busy guard and unsaved selection');

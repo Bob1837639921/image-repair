@@ -1,0 +1,23 @@
+data/
+__pycache__/
+.venv/
+*.log
+
+# Local images, QA outputs and private dataset helpers.
+qa_originals/
+/*.png
+/*.jpg
+benchmark_all.py
+check_originals.py
+check_trim.py
+import_original_tests.py
+show_candidates.py
+
+# Local credentials and transient files.
+.env
+.env.*
+ai-connection.json
+*.key
+*.pem
+*.tmp
+.pytest_cache/
