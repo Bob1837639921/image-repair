@@ -51,7 +51,10 @@ class RepairBatch:
                 try:
                     item=self.service.find(e['id'])
                     if e.get('draft') not in self.service.drafts:e['status']='reviewed';changed=True
-                    elif self.fingerprint(item)!=e['fingerprint'] or not self.service.valid_draft(item,e['draft']):e.update(status='stale',error='裁剪、标记或修复底图已变化，请重新加入');changed=True
+                    elif not self.service.valid_draft(item,e['draft']):e.update(status='stale',error='裁剪、标记或修复底图已变化，请重新加入');changed=True
+                    elif self.fingerprint(item)!=e['fingerprint']:
+                        draft=self.service.drafts[e['draft']]
+                        e.update(fingerprint=self.fingerprint(item),regions=draft['regions']);changed=True
                 except ValueError:e.update(status='stale',error='作品不存在');changed=True
             if changed:self.persist()
             return json.loads(json.dumps(self.job))

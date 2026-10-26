@@ -11,7 +11,7 @@ function node(tag='div'){
 }
 function $(id){if(!nodes.has(id))nodes.set(id,node());return nodes.get(id)}
 const marks=[{id:'a',kind:'crease',region:[.2,.1,.4,.15]},{id:'b',kind:'bump',region:[.6,.45,.7,.5]},{id:'c',kind:'crease',region:[.2,.8,.5,.9]}];
-const context=vm.createContext({$,document:{createElement:node},repairResultImage:{naturalWidth:500,naturalHeight:1000},repairResultBeforeImage:{naturalWidth:500,naturalHeight:1000},repairResultRegion:[.2,.1,.7,.9],repairResultRegions:marks,repairResultFull:false,repairCompareGroups:[],repairCompareActive:0});
+const context=vm.createContext({$,document:{createElement:node},repairBusy:false,repairResultImage:{naturalWidth:500,naturalHeight:1000},repairResultBeforeImage:{naturalWidth:500,naturalHeight:1000},repairResultRegion:[.2,.1,.7,.9],repairResultRegions:marks,repairResultFull:false,repairCompareGroups:[],repairCompareActive:0});
 vm.runInContext(source.slice(source.indexOf('function paintRepairResult'),source.indexOf('new ResizeObserver(fitRepairCompare)')),context);
 context.paintRepairResult();assert.equal(context.repairCompareGroups.length,3);assert.equal($('repairCompare').children.length,3);assert.equal(draws.length,6);
 for(let i=0;i<3;i++){
@@ -20,6 +20,11 @@ for(let i=0;i<3;i++){
  assert.ok(g.card.children[0].textContent.startsWith((i+1)+' · '));
 }
 assert.equal(context.repairCompareGroups[1].card.children[0].textContent,'2 · 凸起');
+const accepted=[];context.acceptRepairRegion=id=>accepted.push(id);
+const regionActions=context.repairCompareGroups[1].card.children[0].children[0];
+assert.equal(regionActions.children.length,4);
+regionActions.children[0].onclick({stopPropagation(){}});
+assert.deepEqual(accepted,['b'],'per-card button must submit its own region id');
 const firstWidth=context.repairCompareGroups[0].canvases[0].style.width;
 context.activateRepairCompare(1);context.zoomRepairCompare(4);
 assert.equal(context.repairCompareGroups[1].scale,'fit','detail zoom disabled');assert.equal($('repairCompareTools').hidden,true);
@@ -31,6 +36,8 @@ context.zoomRepairCompare(8,view,[120,150]);const after=canvas.getBoundingClient
 assert.ok(Math.abs(after.left+pixel[0]*after.width-120)<1e-7);assert.ok(Math.abs(after.top+pixel[1]*after.height-150)<1e-7);
 assert.equal(group.views[0].scrollLeft,view.scrollLeft);assert.equal(group.views[0].scrollTop,view.scrollTop);
 context.repairResultFull=true;context.paintRepairResult();assert.equal(context.repairCompareGroups.length,1);assert.equal(context.repairCompareGroups[0].canvases[0].width,500);assert.equal(context.repairCompareGroups[0].canvases[0].height,1000);
+assert.equal($('repairCompareTitle').textContent,'完整作品对比');assert.equal(context.repairCompareGroups[0].card.children.length,1,'full view must not have a redundant inner title bar');assert.ok(context.repairCompareGroups[0].card.classList.contains('full-work'));
 context.repairResultFull=false;context.paintRepairResult();assert.equal(context.repairCompareGroups.length,3);
+assert.equal($('repairCompareTitle').textContent,'修复前后对比');assert.equal(context.repairCompareGroups[0].card.children.length,2,'detail keeps numbered actions');
 context.repairResultRegions=[marks[0]];context.paintRepairResult();assert.equal(context.repairCompareGroups.length,1);assert.equal($('repairCompare').classList.contains('multiple'),false);
 console.log('PASS: numbered detail pairs auto-fit with zoom disabled; full view retains anchored zoom/synchronized pan; full/detail toggle and single-region fallback');

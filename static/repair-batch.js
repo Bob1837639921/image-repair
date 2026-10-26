@@ -40,7 +40,7 @@ async function showBatchRepairResult(entry){
  repairBusy=true;lastRepairMethod='ai';$('repairMethod').value='ai';const serial=++repairResultSerial,id=entry.id;
  setRepairResultState('loading','正在读取已完成的批量结果，不会再次调用 AI');
  try{const [before,after]=await Promise.all([decodedImage(`/api/repair/image/${id}?detail=1&v=${current.revision}`),decodedImage(`/api/repair/image/${id}?detail=1&v=${current.revision}&draft=${entry.draft}`)]);if(current?.id!==id||workStage!=='repair'||serial!==repairResultSerial)return;repairDraft=entry.draft;repairResultBeforeImage=before;repairResultImage=after;repairResultRegions=entry.regions;const regions=entry.regions.map(e=>e.region);repairResultRegion=[Math.min(...regions.map(r=>r[0])),Math.min(...regions.map(r=>r[1])),Math.max(...regions.map(r=>r[2])),Math.max(...regions.map(r=>r[3]))];repairResultFull=false;paintRepairResult();setRepairResultState('ready');$('repairPreview').disabled=true;$('repairAI').disabled=true}
- catch(e){setRepairResultState('error',e.message)}finally{repairBusy=false}
+ catch(e){setRepairResultState('error',e.message)}finally{repairBusy=false;$('repairAI').disabled=false}
 }
 const selectWithNoBatch=selectRepair;
 selectRepair=async function(id){if(repairBusy||repairDraft)return selectWithNoBatch(id);await selectWithNoBatch(id);await pollRepairBatch();if(current?.id===id){const entry=repairBatchState.entries.find(e=>e.id===id&&e.status==='ready');if(entry)await showBatchRepairResult(entry)}};
@@ -48,5 +48,5 @@ const discardWithoutBatch=$('repairDiscard').onclick;
 $('repairDiscard').onclick=async()=>{if(repairBusy)return;const entry=repairBatchState.entries.find(e=>e.id===current?.id&&e.draft===repairDraft&&e.status==='ready');try{if(entry)await api('repair/batch-dismiss',{id:entry.id,draft:entry.draft});await discardWithoutBatch();await pollRepairBatch()}catch(e){toast(e.message)}};
 const regenerateWithoutBatch=$('repairRegenerate')?.onclick;
 if(regenerateWithoutBatch)$('repairRegenerate').onclick=async()=>{if(repairBusy)return;const entry=repairBatchState.entries.find(e=>e.id===current?.id&&e.draft===repairDraft&&e.status==='ready');try{if(entry)await api('repair/batch-dismiss',{id:entry.id,draft:entry.draft});await regenerateWithoutBatch();await pollRepairBatch()}catch(e){toast(e.message)}};
-$('repairAI').title='只修复当前作品；多幅请用顶部“批量 AI 修复”';
+$('repairAI').title='直接将当前作品的全部标记交给 AI；已有预览时，成功后才替换，失败保留原预览。可能产生调用费用。';
 pollRepairBatch();setInterval(pollRepairBatch,2500);

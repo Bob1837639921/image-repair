@@ -17,3 +17,9 @@ context.repairBusy=true;context.deleteRepairMark('second');assert.equal(context.
 context.repairBusy=false;context.repairSelection=[.2,.2,.3,.3];context.deleteRepairMark(null);
 assert.equal(context.repairSelection,null);assert.equal(context.repairMarks.length,1);
 console.log('PASS: type change preserves region; deletion persists only target; busy guard and unsaved selection');
+const savedBefore=saves.length;
+context.repairDraft='pending';context.repairSelection=[.1,.1,.2,.2];context.repairActiveMark=null;context.repairKindPicker.hidden=false;
+vm.runInContext(source.slice(source.indexOf("$('repairCancelSelection').onclick="),source.indexOf('const repairContextMenu=')),context);
+$('repairCancelSelection').onclick();assert.equal(context.repairSelection,null);assert.equal(context.repairKindPicker.hidden,true);assert.equal(saves.length,savedBefore);assert.equal(context.repairDraft,'pending');assert.equal(context.repairMarks.length,1);
+context.deleteRepairMark('second');assert.equal(context.repairMarks.length,1,'saved pending region must remain protected');
+console.log('PASS: picker delete cancels temporary box during pending review without deleting saved marks or preview');

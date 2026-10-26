@@ -1,0 +1,11 @@
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+const source=fs.readFileSync(__dirname+'/static/app.js','utf8'),classes=new Set(),storage=new Map([['scroll-studio.settings-collapsed','true']]);
+const main={classList:{toggle(name,on){on?classes.add(name):classes.delete(name)},contains:name=>classes.has(name)}};
+const tip={};const toggle={setAttribute(name,value){this[name]=value},querySelector:()=>tip};
+const c=vm.createContext({document:{querySelector:()=>main},settingsToggle:toggle,localStorage:{getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value)}});
+vm.runInContext(source.slice(source.indexOf('function setSettingsCollapsed('),source.indexOf("$('importFiles').remove()")),c);
+assert.ok(classes.has('settings-collapsed'));assert.equal(toggle['aria-expanded'],'false');assert.equal(tip.textContent,'展开修复工具');
+toggle.onclick();assert.equal(classes.has('settings-collapsed'),false);assert.equal(toggle['aria-expanded'],'true');assert.equal(storage.get('scroll-studio.settings-collapsed'),'false');
+toggle.onclick();assert.ok(classes.has('settings-collapsed'));assert.equal(storage.get('scroll-studio.settings-collapsed'),'true');
+c.localStorage.setItem=()=>{throw Error('Storage unavailable')};assert.doesNotThrow(()=>c.setSettingsCollapsed(false));
+console.log('PASS: collapse/expand, accessible state, reload preference and unavailable-storage fallback');

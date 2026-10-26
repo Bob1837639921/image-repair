@@ -243,6 +243,19 @@ const finalActions=document.createElement('div');finalActions.className='final-a
 primaryActions.remove();
 for(const block of [...settingsPanel.querySelectorAll(':scope > .block')])block.remove();
 for(const node of [...settingsPanel.querySelectorAll(':scope > .eyebrow,:scope > h2')])node.remove();
+settingsPanel.id='settingsPanel';
+const settingsToggle=document.createElement('button');settingsToggle.id='settingsToggle';settingsToggle.className='settings-toggle';settingsToggle.type='button';settingsToggle.setAttribute('aria-controls','settingsPanel');settingsToggle.innerHTML='<span class="settings-toggle-arrow" aria-hidden="true">›</span><span class="settings-toggle-label" aria-hidden="true">工具</span><span class="settings-toggle-tip" aria-hidden="true"></span>';document.querySelector('main').append(settingsToggle);
+function setSettingsCollapsed(collapsed){
+ document.querySelector('main').classList.toggle('settings-collapsed',collapsed);
+ settingsToggle.querySelector('.settings-toggle-tip').textContent=collapsed?'展开修复工具':'收起工具，专注看图';
+ settingsToggle.title=collapsed?'展开右侧工具栏':'收起右侧工具栏，扩大图片和修复对比';
+ settingsToggle.setAttribute('aria-label',collapsed?'展开右侧工具栏':'收起右侧工具栏');
+ settingsToggle.setAttribute('aria-expanded',String(!collapsed));
+ try{localStorage.setItem('scroll-studio.settings-collapsed',String(collapsed))}catch{}
+}
+settingsToggle.onclick=()=>setSettingsCollapsed(!document.querySelector('main').classList.contains('settings-collapsed'));
+let settingsStartCollapsed=false;try{settingsStartCollapsed=localStorage.getItem('scroll-studio.settings-collapsed')==='true'}catch{}
+setSettingsCollapsed(settingsStartCollapsed);
 $('importFiles').remove();$('importFolder').textContent='导入文件夹';$('importTop').textContent='导入图片';
 const importActions=document.createElement('div');importActions.className='header-imports';$('importTop').before(importActions);importActions.append($('importTop'),$('importFolder'));document.querySelector('.imports').remove();
 $('export').childNodes[0].textContent='导出已确认 ';

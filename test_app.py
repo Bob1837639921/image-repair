@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw
-from imaging import render, validate, detect, refine_native, suggest_trim, validate_trim, automatic_process, FULL
+from imaging import render, validate, detect, refine_native, suggest_trim, validate_trim, automatic_process, same_colour_sheet, FULL
 
 
 class GeometryTests(unittest.TestCase):
@@ -85,10 +85,31 @@ class GeometryTests(unittest.TestCase):
 
     def test_already_framed_weak_inset_keeps_full_image(self):
         candidate=dict(points=[[0,0],[.895,0],[1,1],[0,1]],edge_support=[0,0,.6,0])
-        with patch('imaging.detect',return_value=[candidate]):
+        with patch('imaging.detect',return_value=[candidate]),patch('imaging.same_colour_sheet',return_value=None):
             result=automatic_process('unused.png')
         self.assertEqual(result['points'],FULL)
         self.assertFalse(any(result['trim'].values()))
+
+    def test_same_colour_fallback_rejects_rules_and_protects_outer_ink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'paper.png'
+            # Two printed rules on a finished sheet are not paper boundaries.
+            im=Image.new('RGB',(1000,750),'#bbc3c8');draw=ImageDraw.Draw(im)
+            draw.line((0,60,999,60),fill='#90989d',width=2)
+            draw.line((0,560,999,560),fill='#90989d',width=2)
+            draw.text((400,300),'CALLIGRAPHY',fill='black');im.save(path)
+            self.assertIsNone(same_colour_sheet(path))
+            # Real backing texture must still be rejected if there is ink below.
+            rng=np.random.default_rng(21)
+            pixels=np.full((750,1000,3),190.,dtype='float32')
+            pixels[60:560]=200
+            texture=rng.normal(0,8,(190,1000)).astype('float32')
+            from imaging import cv2
+            texture=cv2.GaussianBlur(texture,(0,0),4)
+            pixels[560:]+=texture[:,:,None]*4
+            im=Image.fromarray(np.clip(pixels,0,255).astype('uint8'));draw=ImageDraw.Draw(im)
+            draw.rectangle((200,250,250,350),fill='black');draw.rectangle((400,630,460,660),fill='black');im.save(path)
+            self.assertIsNone(same_colour_sheet(path))
 
     def test_curved_pale_fringe_and_ink_guard(self):
         im=Image.new('RGB',(400,1200),'#bc1826');draw=ImageDraw.Draw(im)

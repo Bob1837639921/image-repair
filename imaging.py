@@ -140,6 +140,65 @@ def effective_crop_points(points, width, height, trim=None):
     return (cv2.perspectiveTransform(corners,matrix)[0]/[width-1,height-1]).tolist()
 
 
+def same_colour_sheet(path,rotation=0):
+    """Conservative fallback for wide sheets whose left/right edges are off-frame.
+
+    Require two full-width transitions, quiet ink-free backing, and a stronger
+    texture change below the sheet. Internal fan outlines cannot satisfy these
+    tests. This is deliberately not a general-purpose rectangle detector.
+    """
+    with load(path,rotation) as image:
+        image.thumbnail((1100,1100));rgb=np.asarray(image)
+    h,w=rgb.shape[:2]
+    if w/h<1.1 or min(w,h)<100:return None
+    gray=cv2.cvtColor(rgb,cv2.COLOR_RGB2GRAY).astype('float32')
+    blur=cv2.GaussianBlur(gray,(0,0),1)
+    difference=blur[4:]-blur[:-4]
+    margin=max(5,round(w*.05))
+    profile=np.median(difference[:,margin:-margin],axis=1)
+    def boundary(lo,hi):
+        lo=max(3,round(h*lo));hi=min(h-4,round(h*hi))
+        peak=lo+int(np.argmax(np.abs(profile[lo-2:hi-2])))
+        sign=np.sign(profile[peak-2]);strength=abs(float(profile[peak-2]))
+        if strength<3:return None
+        # Refit the same transition in independent bands, including the sides.
+        xs=[];ys=[];weights=[]
+        for left,right in zip(np.linspace(margin,w-margin,17)[:-1],np.linspace(margin,w-margin,17)[1:]):
+            local=np.median(difference[:,int(left):int(right)],axis=1)*sign
+            start=max(2,peak-14);end=min(h-3,peak+15)
+            y=start+int(np.argmax(local[start-2:end-2]))
+            weight=float(local[y-2])
+            if weight>=max(2,strength*.25):xs.append((left+right)/2);ys.append(y);weights.append(weight)
+        if len(xs)<14:return None
+        xs=np.asarray(xs);ys=np.asarray(ys);slope,intercept=np.polyfit(xs,ys,1)
+        residual=np.abs(ys-(slope*xs+intercept))
+        good=residual<3
+        if good.sum()<14 or abs(slope)*w>h*.035:return None
+        slope,intercept=np.polyfit(xs[good],ys[good],1)
+        return np.array([intercept,intercept+slope*(w-1)]),strength
+    top=boundary(.025,.22);bottom=boundary(.55,.90)
+    if top is None or bottom is None:return None
+    t,ts=top;b,bs=bottom
+    if min(b-t)<h*.45:return None
+    # A genuine blank support sheet must not contain omitted strokes/seals.
+    yy,xx=np.mgrid[:h,:w];top_line=t[0]+(t[1]-t[0])*xx/(w-1);bottom_line=b[0]+(b[1]-b[0])*xx/(w-1)
+    inside=(yy>top_line+8)&(yy<bottom_line-8)
+    outside=(yy<top_line-8)|(yy>bottom_line+8)
+    dark=gray<min(100,float(np.percentile(gray,80))*.58)
+    red=(rgb[:,:,0].astype(float)>rgb[:,:,1]*1.18)&(rgb[:,:,0].astype(float)>rgb[:,:,2]*1.13)&(rgb[:,:,1]<165)
+    if np.mean((dark|red)[outside])>.001 or np.mean(dark[inside])<.003:return None
+    # Printed long rules alone are insufficient: paper/backing texture differs.
+    texture=cv2.GaussianBlur(gray,(0,0),2)-cv2.GaussianBlur(gray,(0,0),9)
+    above=(yy>bottom_line-h*.12)&(yy<bottom_line-12)&~dark&~red
+    below=(yy>bottom_line+12)&(yy<bottom_line+h*.12)&~dark&~red
+    if min(above.sum(),below.sum())<w*8:return None
+    # Median energy is not dominated by the fan's gold outline near the edge.
+    if float(np.median(np.abs(texture[below])))<max(.7,float(np.median(np.abs(texture[above])))*1.25):return None
+    # Shift two preview pixels inward to exclude the seam itself, not the fan.
+    points=[[0,(t[0]+2)/(h-1)],[1,(t[1]+2)/(h-1)],[1,(b[1]-2)/(h-1)],[0,(b[0]-2)/(h-1)]]
+    return dict(points=validate(points).tolist(),score=.9,method='same-colour-sheet',edge_support=[ts,0,bs,0])
+
+
 def automatic_process(path, rotation=0, expected_aspect=None):
     candidates=detect(path,rotation,expected_aspect) if expected_aspect else detect(path,rotation)
     points=candidates[0]['points'] if candidates else FULL
@@ -150,7 +209,13 @@ def automatic_process(path, rotation=0, expected_aspect=None):
         # A nearly full-frame rectangle without supported internal edges is
         # already framed. Dense grids/text must not create an inset trapezoid.
         if coverage>.85 and supports and sum(v>=2 for v in supports)<2:
+            sheet=same_colour_sheet(path,rotation)
+            if sheet:
+                return dict(points=sheet['points'],trim=validate_trim(),candidates=[sheet]+candidates[:3],auto_result=dict(needs_review=False,method='same-colour-sheet',note='已结合连续纸边与纹理差异排除同色垫纸'))
             return dict(points=FULL,trim=validate_trim(),candidates=[dict(points=FULL,method='full-frame')]+candidates[:3],auto_result=dict(needs_review=True,note='纸边证据不足，暂保留完整原图，请检查画心边界'))
+    if not candidates:
+        sheet=same_colour_sheet(path,rotation)
+        if sheet:return dict(points=sheet['points'],trim=validate_trim(),candidates=[sheet],auto_result=dict(needs_review=False,method='same-colour-sheet',note='已结合连续纸边与纹理差异排除同色垫纸'))
     trim=validate_trim()
     notes=[]
     if candidates:

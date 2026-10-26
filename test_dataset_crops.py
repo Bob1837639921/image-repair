@@ -18,6 +18,16 @@ PROJECT=ROOT/'data'/'project.json'
 
 @unittest.skipUnless(PROJECT.exists(),'Local photograph fixtures are unavailable')
 class PhotographRegressions(unittest.TestCase):
+    def test_022_same_colour_backing_is_not_part_of_fan_sheet(self):
+        items=json.loads(PROJECT.read_text('utf-8'))
+        item=next(x for x in items if x['name'].startswith('会员_022_'))
+        result=automatic_process(ROOT/'data'/'originals'/item['file'],0,artwork_aspect(item['name'],item['width'],item['height']))
+        points=np.asarray(result['points'])
+        self.assertEqual(result['auto_result']['method'],'same-colour-sheet')
+        self.assertTrue(np.all((points[:2,1]>.05)&(points[:2,1]<.075)),points)
+        self.assertTrue(np.all((points[2:,1]>.74)&(points[2:,1]<.765)),points)
+        self.assertLess(points[0,0],.002);self.assertGreater(points[1,0],.998)
+
     def test_bottom_character_and_faint_upper_seal_survive(self):
         items=json.loads(PROJECT.read_text('utf-8'))
         for number in ('069','135'):
