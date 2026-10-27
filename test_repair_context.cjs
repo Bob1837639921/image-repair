@@ -23,3 +23,8 @@ vm.runInContext(source.slice(source.indexOf("$('repairCancelSelection').onclick=
 $('repairCancelSelection').onclick();assert.equal(context.repairSelection,null);assert.equal(context.repairKindPicker.hidden,true);assert.equal(saves.length,savedBefore);assert.equal(context.repairDraft,'pending');assert.equal(context.repairMarks.length,1);
 context.deleteRepairMark('second');assert.equal(context.repairMarks.length,1,'saved pending region must remain protected');
 console.log('PASS: picker delete cancels temporary box during pending review without deleting saved marks or preview');
+const prompted=[];context.showRepairLevelPrompt=id=>prompted.push(id);
+context.repairDraft=null;context.repairMarks=[];context.repairActiveMark=null;context.repairSelection=[.2,.2,.4,.4];
+context.chooseRepairKind('crease');assert.equal(prompted.length,1);assert.equal(prompted[0],context.repairMarks[0].id);assert.equal(context.repairMarks[0].level,'standard');
+context.chooseRepairKind('bump');assert.equal(prompted.length,1,'existing mark type changes do not repeatedly prompt');
+console.log('PASS: classifying a new selection prompts for strength once, defaulting to standard');

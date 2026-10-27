@@ -338,40 +338,107 @@ def local_repair(image,region,strength=.65,kind='crease',brush=None):
 
 
 def snap_crease(image,region,brush):
-    """Pull a rough crease stroke onto the fold line actually in the image.
+    """Trace locally across the user's path; unsupported parts stay untouched.
 
-    Returns dict(brush, region) with a centreline path and a width fitted to
-    the fold, or None when no clear fold is found under the stroke.
+    Searching in path normals avoids the old global dominant-line fit jumping
+    between nearby folds. Ink/seal gaps are deliberately not interpolated.
     """
     rect=region_pixels(region,image.size);x1,y1,x2,y2=rect
-    stroke,radius=brush_mask(brush,image.size,rect)
-    w,h=x2-x1,y2-y1;short=min(w,h);pad=max(32,min(320,short))
+    radius=max(1,round(float(brush['size'])*image.width/2))
+    pad=max(16,min(100,radius+12))
     box=(max(0,x1-pad),max(0,y1-pad),min(image.width,x2+pad),min(image.height,y2+pad))
     rgb=np.asarray(image.crop(box)).astype('float32');gray=cv2.cvtColor(rgb,cv2.COLOR_RGB2GRAY)
-    left,top=x1-box[0],y1-box[1]
-    focus=np.zeros(gray.shape,bool);focus[top:top+h,left:left+w]=stroke
-    info=crease_correction(rgb,gray,np.s_[top:top+h,left:left+w],short,max(w,h),focus,trace=True)
-    if not info or info['peak']<.006:return None
-    reach=cv2.dilate(focus.astype('uint8'),np.ones((3,3),'uint8')).astype(bool)
-    rows=info['rows'];step=max(1,len(rows)//60);points=[]
-    for row in rows[::step]:
-        xt,yt=info['centre']+float(info['shift'][row]),float(row)
-        xo,yo=(gray.shape[1]-1-yt,xt) if info['turns'] else (xt,yt)
-        if 0<=round(yo)<gray.shape[0] and 0<=round(xo)<gray.shape[1] and reach[round(yo),round(xo)]:
-            points.append([min(1,max(0,(xo+box[0])/image.width)),min(1,max(0,(yo+box[1])/image.height))])
-    if len(points)<2:return None
-    diameter=float(np.clip(2*info['half']+8,8,2*radius+1))
-    size=diameter/image.width;r=diameter/2
-    xs=[p[0]*image.width for p in points];ys=[p[1]*image.height for p in points]
-    snapped=[max(0,(min(xs)-r-2)/image.width),max(0,(min(ys)-r-2)/image.height),min(1,(max(xs)+r+2)/image.width),min(1,(max(ys)+r+2)/image.height)]
-    return dict(brush=dict(size=size,paths=[points]),region=snapped)
+    closed=cv2.morphologyEx(gray,cv2.MORPH_CLOSE,cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(15,15)))
+    lab=cv2.cvtColor(rgb.astype('uint8'),cv2.COLOR_RGB2LAB).astype('float32')
+    chroma=np.linalg.norm(lab[:,:,1:]-np.median(lab.reshape(-1,3),axis=0)[1:],axis=2)
+    ink=(gray<closed*.72)|(chroma>30)
+    clear=1-cv2.dilate(ink.astype('uint8'),np.ones((9,9),'uint8')).astype('float32')
+    light=cv2.GaussianBlur(np.log1p(gray),(0,0),1.2)
+    gx=cv2.Sobel(light,cv2.CV_32F,1,0)/8;gy=cv2.Sobel(light,cv2.CV_32F,0,1)/8
+    reach=min(48,max(2,radius*.7));offsets=np.arange(-math.floor(reach),math.floor(reach)+1,dtype='float32')
+    along=np.arange(-4,5,dtype='float32')
+    paths=[];confidences=[];widths=[]
+    for path in brush['paths']:
+        original=np.asarray(path,'float32')*[image.width,image.height]-box[:2]
+        if len(original)<2:paths.append(path);confidences.extend([False]);continue
+        distances=np.r_[0,np.cumsum(np.linalg.norm(np.diff(original,axis=0),axis=1))]
+        keep=np.r_[True,np.diff(distances)>1e-4];original=original[keep];distances=distances[keep]
+        if len(original)<2:paths.append(path);confidences.extend([False]);continue
+        samples=np.linspace(0,distances[-1],min(2000,max(2,math.ceil(distances[-1]/4)+1)))
+        points=np.column_stack([np.interp(samples,distances,original[:,axis]) for axis in (0,1)])
+        tangent=np.gradient(points,axis=0);tangent/=np.maximum(np.linalg.norm(tangent,axis=1)[:,None],1e-6)
+        normal=np.column_stack([-tangent[:,1],tangent[:,0]])
+        shifts=np.zeros(len(points));good=np.zeros(len(points),bool)
+        for i,(point,t,n) in enumerate(zip(points,tangent,normal)):
+            xy=point+offsets[:,None,None]*n+along[None,:,None]*t
+            mx=xy[:,:,0].astype('float32');my=xy[:,:,1].astype('float32')
+            sample=lambda a:cv2.remap(a,mx,my,cv2.INTER_LINEAR,borderMode=cv2.BORDER_CONSTANT)
+            valid=sample(clear)*(mx>=0)*(my>=0)*(mx<gray.shape[1]-1)*(my<gray.shape[0]-1)
+            gradients=sample(gx)*n[0]+sample(gy)*n[1]
+            weight=valid.sum(1)
+            signed=(gradients*valid).sum(1)/np.maximum(weight,1)
+            energy=np.abs(signed)
+            # Grain is incoherent along the fold; require a coherent local edge.
+            coherence=np.abs((gradients*valid).sum(1))/np.maximum((np.abs(gradients)*valid).sum(1),1e-6)
+            noise=max(.0015,float(np.median(energy)))
+            score=energy*np.exp(-.6*(offsets/max(reach,1))**2)
+            score[(weight<7)|(coherence<.7)]=0
+            peak=int(score.argmax())
+            if peak in (0,len(offsets)-1) or energy[peak]<max(.004,noise*3):continue
+            # Never move the user's mark onto a letter, including obscured folds.
+            origin=sample(clear)[len(offsets)//2]
+            if origin.min()<.99:continue
+            lo=hi=peak
+            while lo>0 and energy[lo-1]>.4*energy[peak]:lo-=1
+            while hi<len(offsets)-1 and energy[hi+1]>.4*energy[peak]:hi+=1
+            # A narrow ridge has two opposite slopes. Centre on both sides,
+            # rather than snapping to whichever edge happens to be darker.
+            paired=(signed*signed[peak]<0)&(energy>.4*energy[peak])&(weight>=7)&(coherence>=.7)
+            paired&=(np.abs(offsets-offsets[peak])<=min(10,max(4,radius*.5)))
+            if paired.any():
+                mate=int(np.where(paired,score,-1).argmax())
+                lo=min(lo,mate);hi=max(hi,mate)
+            shifts[i]=float((offsets[lo]+offsets[hi])/2);good[i]=True
+            widths.append(float(hi-lo+8))
+        # Isolated detections are often specks. Only smooth contiguous confident
+        # runs; do not pull uncertain sections across ink or missing folds.
+        for start in np.nonzero(good&~np.r_[False,good[:-1]])[0]:
+            end=start
+            while end<len(good) and good[end]:end+=1
+            if end-start<3:good[start:end]=False;continue
+            run=shifts[start:end];padded=np.pad(run,1,mode='edge')
+            shifts[start:end]=np.median(np.lib.stride_tricks.sliding_window_view(padded,3),axis=1)
+        shifts[~good]=0
+        adjusted=points+shifts[:,None]*normal
+        normalized=np.clip((adjusted+box[:2])/[image.width,image.height],0,1)
+        paths.append(normalized.tolist());confidences.extend(good.tolist())
+    if not any(confidences):return None
+    # The current brush format has one width. Retain it whenever any section
+    # could not be fitted, so uncertain paper is not silently excluded.
+    diameter=2*radius
+    if all(confidences) and widths:diameter=min(diameter,max(8,float(np.percentile(widths,90))))
+    points=np.concatenate([np.asarray(path)*[image.width,image.height] for path in paths]);r=diameter/2+2
+    lower=np.maximum(0,(points.min(0)-r)/[image.width,image.height]);upper=np.minimum(1,(points.max(0)+r)/[image.width,image.height])
+    return dict(brush=dict(size=diameter/image.width,paths=paths),region=[*lower.tolist(),*upper.tolist()])
+
+
+REPAIR_LEVELS={'light':.3,'standard':.65,'strong':1.0}
+
+
+def mark_strength(mark,default=.65):
+    level=mark.get('level')
+    if level is not None and (not isinstance(level,str) or level not in REPAIR_LEVELS):raise ValueError('修复等级须为轻度、标准或加强')
+    return REPAIR_LEVELS[level] if level else default
 
 
 def repair_prompt(kind,annotation=None):
     task={'crease':'Repair a localized paper fold: reduce the narrow bright ridge, dark crease line and paired fold shadow, blending into the adjacent paper texture without blurring ink.',
           'bump':'Repair a localized paper bulge: even the broad highlight/shadow gradient caused by the raised paper while preserving natural paper grain. Do not treat it as a thin crack or erase intentional strokes.',
           'blemish':'The user marked a blank-paper blemish for stronger restoration. Remove the localized particle, speck, stain or dent with its highlight and shadow. Reconstruct natural paper grain from adjacent clean paper, not a flat colour or blurred patch. Keep intentional ink, seals and gold rules unchanged.'}[kind]
-    return ('Conservative archival restoration of a Chinese calligraphy photograph. The user explicitly classified this masked region as '+kind+'. '+task+
+    intensity={'light':'Use a light correction, reducing the defect gently while retaining some original shading.',
+               'standard':'Use a standard correction, clearly reducing the defect while retaining natural paper texture.',
+               'strong':'Use a strong correction, removing as much of the marked defect as possible while preserving ink and natural paper texture.'}.get((annotation or {}).get('level'),'')
+    return ('Conservative archival restoration of a Chinese calligraphy photograph. The user explicitly classified this masked region as '+kind+'. '+task+' '+intensity+
             ' Modify only the transparent mask. Surrounding pixels are reference only. Preserve the exact shape, position, thickness and tonal variation of every ink stroke, inscription and seal, including faint ink and strokes crossing the defect. Preserve the original paper colour, ink colour, seal colour, white balance, exposure, saturation, printed patterns and grain; match the adjacent unmasked paper with no colour cast or visible patch seams. Do not apply global colour grading or change resolution, aspect ratio or composition. Added canvas padding is reference only and must not move the artwork. Do not invent or reconstruct illegible characters, remove seals, whiten the paper, sharpen, recolour, rotate, warp or redraw the artwork. If a detail cannot be distinguished from ink, leave it unchanged. No added text or borders. '+
             ('User annotation metadata (original image normalized coordinates): '+json.dumps({k:v for k,v in annotation.items() if k!='brush'},ensure_ascii=False) if annotation else ''))
 
@@ -385,6 +452,8 @@ def validate_regions(regions,size):
         key=str(mark.get('id',index+1))
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,100}',key) or key in ids:raise ValueError('标记编号无效或重复')
         clean=dict(id=key,region=[float(v) for v in mark['region']],kind=mark['kind'])
+        if mark.get('level') is not None:
+            mark_strength(mark);clean['level']=mark['level']
         if mark.get('brush') is not None:clean['brush']=validate_brush(mark['brush'])
         ids.add(key);result.append(clean)
     return result
@@ -616,15 +685,20 @@ class RepairService:
                 snapshot=json.loads(json.dumps(self.drafts[token]))
             mark=next((m for m in snapshot['regions'] if m['id']==body.get('mark_id')),None)
             if mark is None:raise ValueError('该修复区域已处理或不存在')
+            original_regions=json.loads(json.dumps(snapshot['regions']))
             regions=[m for m in snapshot['regions'] if m['id']!=mark['id']] if action=='discard-region' else snapshot['regions']
             if action=='retry-region':
+                if 'level' in body:
+                    mark_strength({'level':body['level']})
+                    if body['level'] is None:mark.pop('level',None)
+                    else:mark['level']=body['level']
                 with self.image(item) as base:
                     method=body.get('method',snapshot.get('patches',{}).get(mark['id'],{}).get('method',snapshot.get('method','local')))
                     if method not in ('local','ai'):raise ValueError('修复方式不正确')
                     if method=='ai':
                         key,url,model=ai_config or (self.key,self.base_url,self.model)
                         result=ai_repair(base,mark['region'],key,mark['kind'],url,model,mark)
-                    else:result=local_repair(base,mark['region'],snapshot.get('strength',.65),mark['kind'],mark.get('brush'))
+                    else:result=local_repair(base,mark['region'],mark_strength(mark,snapshot.get('strength',.65)),mark['kind'],mark.get('brush'))
                     if result.size!=base.size:raise ValueError('修复结果像素尺寸改变，已拒绝保存')
                     rect=region_pixels(mark['region'],base.size)
                     delta=np.asarray(result.crop(rect)).astype('int16')-np.asarray(base.crop(rect)).astype('int16');result.close()
@@ -632,10 +706,14 @@ class RepairService:
                     snapshot.setdefault('patches',{})[mark['id']]=dict(file=filename,rect=list(rect),method=method)
             with self.lock:
                 target=next(x for x in self.items if x['id']==item['id'])
-                if not self.valid_draft(target,token) or self.drafts[token]['regions']!=snapshot['regions']:raise ValueError('预览已变化，请重新加载')
+                if not self.valid_draft(target,token) or self.drafts[token]['regions']!=original_regions:raise ValueError('预览已变化，请重新加载')
                 if regions:
                     with self.compose_regions(target,snapshot,regions) as candidate:
                         filename=uuid.uuid4().hex+'.png';candidate.save(self.folder/filename,'PNG')
+                    if action=='retry-region' and 'level' in body:
+                        updated=[dict(mark) if m['id']==mark['id'] else m for m in self.marks(target)]
+                        target['repair_marks']=dict(signature=signature,regions=updated)
+                        snapshot['marks']=updated;self.save()
                     snapshot.update(file=filename,regions=regions);self.drafts[token]=snapshot
                 else:self.drafts.pop(token)
                 self.save_drafts()
@@ -652,7 +730,7 @@ class RepairService:
                     if method=='ai':
                         key,base,model=ai_config or (self.key,self.base_url,self.model)
                         result=ai_repair(repaired,mark['region'],key,mark['kind'],base,model,dict(index=index+1,total=len(regions),**mark))
-                    else:result=local_repair(repaired,mark['region'],body.get('strength',.65),mark['kind'],mark.get('brush'))
+                    else:result=local_repair(repaired,mark['region'],mark_strength(mark,body.get('strength',.65)),mark['kind'],mark.get('brush'))
                     rect=region_pixels(mark['region'],image.size)
                     delta=np.asarray(result.crop(rect)).astype('int16')-np.asarray(repaired.crop(rect)).astype('int16')
                     patch_file=token+'_'+str(index)+'.npz'

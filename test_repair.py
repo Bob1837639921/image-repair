@@ -12,6 +12,39 @@ from imaging import np,cv2,FULL,DEFAULTS
 
 
 class RepairTests(unittest.TestCase):
+    def test_individual_levels_persist_and_retry_only_selected_region(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);source=root/'source.png';Image.new('RGB',(120,240),'#d8cfb4').save(source)
+            item=dict(id='test',file=source.name,points=FULL,rotation=0,settings=DEFAULTS,trim={},confirmed=True,revision=0)
+            def create():return RepairService(root,lambda key:json.loads(json.dumps(item)),lambda x:source,threading.RLock(),lambda:None,[item])
+            service=create();marks=[dict(id='a',region=[.1,.1,.4,.3],kind='crease',level='light'),dict(id='b',region=[.5,.6,.9,.8],kind='crease')]
+            service.post('marks',dict(id='test',signature=crop_signature(item),regions=marks))
+            with patch('repairing.local_repair',side_effect=lambda image,*args:image.copy()) as call:
+                preview=service.post('preview',dict(id='test',regions=marks,strength=.8))
+                self.assertEqual([c.args[2] for c in call.call_args_list],[.3,.8])
+            token=preview['draft'];other=service.drafts[token]['patches']['b']['file']
+            with patch('repairing.local_repair',side_effect=lambda image,*args:image.copy()) as call:
+                result=service.post('retry-region',dict(id='test',draft=token,mark_id='a',level='strong'))
+                self.assertEqual(call.call_count,1);self.assertEqual(call.call_args.args[2],1)
+            self.assertEqual(result['regions'][0]['level'],'strong')
+            self.assertEqual(service.marks(item)[0]['level'],'strong')
+            self.assertNotIn('level',service.marks(item)[1])
+            self.assertEqual(service.drafts[token]['patches']['b']['file'],other)
+            self.assertTrue(create().valid_draft(item,token),'updated level survives restart')
+            with patch('repairing.local_repair',side_effect=ValueError('failed')):
+                with self.assertRaisesRegex(ValueError,'failed'):service.post('retry-region',dict(id='test',draft=token,mark_id='a',level='light'))
+            self.assertEqual(service.marks(item)[0]['level'],'strong','failure keeps previous level and preview')
+            self.assertTrue(service.valid_draft(item,token))
+            service.post('accept-region',dict(id='test',draft=token,mark_id='a'))
+            self.assertEqual([m['id'] for m in service.marks(item)],['b'])
+            self.assertTrue(service.valid_draft(item,token))
+
+    def test_invalid_levels_rejected_and_ai_prompt_uses_level(self):
+        from repairing import validate_regions
+        with self.assertRaises(ValueError):validate_regions([dict(id='a',kind='crease',region=[.1,.1,.5,.5],level='extreme')],(100,100))
+        self.assertIn('Use a strong correction',repair_prompt('crease',dict(level='strong')))
+        self.assertIn('Use a light correction',repair_prompt('crease',dict(level='light')))
+
     def test_direct_ai_preserves_previous_preview_until_success_and_supports_one_region(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);source=root/'source.png';Image.new('RGB',(100,200),'#d8cfb4').save(source)
@@ -210,6 +243,47 @@ class RepairTests(unittest.TestCase):
         x1,y1,x2,y2=snapped['region'];self.assertTrue(0<=x1<x2<=1 and 0<=y1<y2<=1)
         plain=np.clip(np.random.default_rng(1).normal(200,2.5,(h,w,3)),0,255).astype('uint8')
         self.assertIsNone(snap_crease(Image.fromarray(plain),region,brush),'no fold, no snap')
+
+    def test_three_grades_produce_separated_pixel_corrections(self):
+        from repairing import mark_strength
+        folded,line=self.wavy_fold();h,w=folded.shape[:2]
+        region=[.1,.35,.9,.7];changes=[]
+        for level in ('light','standard','strong'):
+            output=np.asarray(local_repair(Image.fromarray(folded),region,mark_strength(dict(level=level))))
+            changes.append(float(np.abs(output.astype(float)-folded).mean()))
+        self.assertGreater(changes[1],changes[0]*1.6)
+        self.assertGreater(changes[2],changes[1]*1.3)
+
+    def test_snap_keeps_occluded_sections_and_all_user_paths(self):
+        folded,line=self.wavy_fold();h,w=folded.shape[:2]
+        folded[70:140,140:175]=15  # a character hides the crease
+        path=[[x/w,float(line[x]+7)/h] for x in range(40,281,4)]
+        other=[[.1,.85],[.3,.85],[.5,.85]]  # unconnected blank-paper stroke
+        brush=dict(size=36/w,paths=[path,other])
+        result=snap_crease(Image.fromarray(folded),[.02,.3,.97,.95],brush)
+        self.assertIsNotNone(result)
+        self.assertEqual(len(result['brush']['paths']),2)
+        points=np.array(result['brush']['paths'][0])*[w,h]
+        covered=points[(points[:,0]>145)&(points[:,0]<170)]
+        expected=np.interp(covered[:,0],np.array(path)[:,0]*w,np.array(path)[:,1]*h)
+        self.assertTrue(np.allclose(covered[:,1],expected,atol=.01),'obscured fold retains the user path')
+        self.assertAlmostEqual(result['brush']['size'],brush['size'],'uncertain segments retain original width')
+        self.assertTrue(np.allclose(np.array(result['brush']['paths'][1])[:,1],.85))
+
+    def test_snap_tracks_curves_without_jumping_to_a_stronger_neighbour(self):
+        h,w=280,360;y,x=np.mgrid[:h,:w].astype('float32')
+        line=125+18*np.sin(x/55)
+        d=y-line;neighbour=y-(line-38)
+        shade=1-.09*np.exp(-(d/2)**2)-.3*np.exp(-(neighbour/2)**2)
+        paper=210+np.random.default_rng(4).normal(0,1,(h,w))
+        rgb=np.repeat(np.clip(paper*shade,0,255).astype('uint8')[:,:,None],3,axis=2)
+        brush=dict(size=40/w,paths=[[[xx/w,float(line[0,xx]+5)/h] for xx in range(30,331,4)]])
+        result=snap_crease(Image.fromarray(rgb),[0,.2,1,.8],brush)
+        self.assertIsNotNone(result)
+        points=np.array(result['brush']['paths'][0])*[w,h]
+        expected=125+18*np.sin(points[:,0]/55)
+        self.assertLess(float(np.percentile(np.abs(points[:,1]-expected),90)),5)
+        self.assertLess(float(np.max(np.abs(points[:,1]-(expected+5)))),15,'bounded movement from painted path')
 
     def test_brush_marks_validate_persist_and_preview(self):
         with self.assertRaises(ValueError):validate_brush(dict(size=0,paths=[[[.1,.1]]]))

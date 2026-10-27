@@ -2,7 +2,7 @@ const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/st
 const source=fs.readFileSync(__dirname+'/static/repair.js','utf8'),nodes=new Map(),draws=[];
 function node(tag='div'){
  const classes=new Set();
- const n={tag,style:{},children:[],hidden:false,clientWidth:300,clientHeight:250,scrollLeft:0,scrollTop:0,
+ const n={tag,style:{},dataset:{},children:[],hidden:false,clientWidth:300,clientHeight:250,scrollLeft:0,scrollTop:0,
   classList:{toggle(name,on){on?classes.add(name):classes.delete(name)},contains:name=>classes.has(name)},
   append(...items){items.forEach(x=>{x.parent=n;n.children.push(x)})},replaceChildren(){n.children=[]},setAttribute(){},addEventListener(){},
   querySelector(selector){return n.children.find(x=>x.tag===selector)},getContext:()=>({drawImage:(...args)=>draws.push({n,args})}),
@@ -12,6 +12,8 @@ function node(tag='div'){
 function $(id){if(!nodes.has(id))nodes.set(id,node());return nodes.get(id)}
 const marks=[{id:'a',kind:'crease',region:[.2,.1,.4,.15]},{id:'b',kind:'bump',region:[.6,.45,.7,.5]},{id:'c',kind:'crease',region:[.2,.8,.5,.9]}];
 const context=vm.createContext({$,document:{createElement:node},repairBusy:false,repairResultImage:{naturalWidth:500,naturalHeight:1000},repairResultBeforeImage:{naturalWidth:500,naturalHeight:1000},repairResultRegion:[.2,.1,.7,.9],repairResultRegions:marks,repairResultFull:false,repairCompareGroups:[],repairCompareActive:0});
+context.repairLevelChoices=new Map();
+vm.runInContext(source.slice(source.indexOf('function makeRepairLevelControl('),source.indexOf('function showRepairContextMenu(')),context);
 vm.runInContext(source.slice(source.indexOf('function paintRepairResult'),source.indexOf('new ResizeObserver(fitRepairCompare)')),context);
 context.paintRepairResult();assert.equal(context.repairCompareGroups.length,3);assert.equal($('repairCompare').children.length,3);assert.equal(draws.length,6);
 for(let i=0;i<3;i++){

@@ -241,6 +241,11 @@ label.repair-snap input[type=checkbox]{width:14px;height:14px;margin:0;accent-co
 #repairContextMenu button:hover,#repairContextMenu button:focus-visible{background:var(--paper-subtle)}
 #repairContextMenu [aria-checked=true]{color:var(--accent);font-weight:650;background:var(--accent-soft)}
 #repairContextMenu .danger{color:#a6382b;margin-top:4px;border-top:1px solid var(--line);border-radius:0 0 6px 6px}
+#repairContextLevels{padding:6px 3px 4px;border-top:1px solid var(--line);margin-top:4px}
+#repairContextLevels>span{display:block;font-size:10px;color:var(--muted);padding:2px 5px 5px}
+#repairContextLevels .repair-level-control{display:flex}
+#repairContextLevels .repair-level-control button{display:block;flex:1;width:auto;padding:5px 8px;text-align:center;font-size:11px}
+#repairContextLevels .repair-level-control button.active{background:var(--accent);color:#fff}
 #repairKindPicker{position:absolute;z-index:6;width:216px;padding:10px;border:1px solid var(--line-strong);border-radius:10px;background:var(--paper);box-shadow:0 8px 26px #221d182e}
 #repairKindPicker>span{display:block;font-size:11px;color:var(--muted);margin-bottom:8px}
 #repairKindPicker>div{display:grid;grid-template-columns:1fr 1fr;gap:7px}
@@ -253,7 +258,7 @@ label.repair-snap input[type=checkbox]{width:14px;height:14px;margin:0;accent-co
 .repair-mark.blemish,#repairSelection.blemish{border-color:#9162b4;background:#9162b418;color:#9162b4}
 .repair-mark.blemish>button{background:#8051a3}
 .repair-legend i.blemish{border-color:#9162b4;background:#9162b418}
-.repair-mark-row.blemish button:first-child{border-left:3px solid #9162b4}
+.repair-mark-row.blemish>button:first-child{border-left:3px solid #9162b4}
 .repair-compare-group.blemish .repair-compare-title{border-left-color:#9162b4}
 #repairBrushLayer{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:1;overflow:visible}
 .repair-brush polyline{fill:none;stroke-linecap:round;stroke-linejoin:round;stroke:#d58b23;opacity:.44;transition:opacity .12s}
@@ -270,16 +275,22 @@ label.repair-snap input[type=checkbox]{width:14px;height:14px;margin:0;accent-co
 .repair-mark.bump{border-color:#338fc9;background:#559ddd18}
 .repair-mark.brush,.repair-mark.brush.bump,.repair-mark.brush.blemish{border-color:transparent;background:transparent}
 .repair-mark.active{box-shadow:0 0 0 1px #fff}
+.repair-mark.active{z-index:3}
 .repair-mark.brush.active{box-shadow:none}
 .repair-mark.brush.active>button{box-shadow:0 0 0 2px #fff,0 2px 6px #221d1840}
 .repair-mark>button{pointer-events:auto;position:absolute;left:-2px;top:-22px;white-space:nowrap;font-size:10px;line-height:15px;padding:2px 6px;border:0;border-radius:4px;background:#a76e2c;color:#fff;box-shadow:0 1px 4px #221d1826}
 .repair-mark.bump>button{background:#346e9d}
 #repairMarksPanel{margin-top:6px;padding-top:7px;border-top:1px solid var(--line)}
 #repairMarksCount{font-size:11.5px;font-weight:600;color:var(--ink)}
+.repair-marks-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:5px}
+#repairDeleteAll{font-size:11px;padding:4px 8px;min-height:26px}
 #repairMarksList{max-height:112px;overflow:auto;margin-top:4px;scrollbar-width:thin}
-.repair-mark-row{display:flex;gap:4px;margin:4px 0}
+.repair-mark-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:4px;margin:4px 0}
 .repair-mark-row button{font-size:11px;padding:4px 8px}
-.repair-mark-row button:first-child{flex:1;text-align:left}
+.repair-mark-row>button:first-child{text-align:left;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.repair-mark-grade{min-width:42px;color:var(--ink-soft)}
+.repair-mark-grade.pending{color:#a05f10;border-color:#d6ac68}
+.repair-mark-grade-editor{grid-column:1 / -1;display:flex;justify-content:flex-end;padding:2px 0 4px}
 .repair-mark-row button.active{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:600}
 #repairResult{flex:0 0 calc(68% - 5px);min-width:220px;min-height:0;display:flex;flex-direction:column;border:1px solid var(--line-strong);border-radius:10px;overflow:hidden;background:var(--paper);box-shadow:0 4px 16px #221d1810}
 .repair-result-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 12px;border-bottom:1px solid var(--line);flex-shrink:0}
@@ -296,6 +307,16 @@ label.repair-snap input[type=checkbox]{width:14px;height:14px;margin:0;accent-co
 .repair-compare-group.full-work{border:0;border-radius:0;min-height:0;overflow:hidden}
 .repair-compare-group.full-work .repair-compare-pair{padding:0}
 .repair-compare-title{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;padding:6px 10px;background:#f6f1e7;border-left:3px solid #d58b23}
+.repair-compare-title{flex-wrap:wrap}
+.repair-region-actions{display:flex;gap:5px;flex-wrap:wrap}
+.repair-level-row{display:flex;align-items:center;gap:10px;flex-basis:100%;font-size:11px;font-weight:400}
+.repair-level-note{color:var(--ink-soft)}
+.level-pending .repair-level-note{color:#a05f10}
+.repair-level-control{display:inline-flex;gap:2px;padding:3px;border:1px solid var(--line);border-radius:8px;background:var(--paper)}
+.repair-level-control button{padding:4px 12px;border:0;border-radius:5px;background:transparent;color:var(--ink-soft);font-size:11px;white-space:nowrap}
+.repair-level-control button.active{background:var(--accent);color:#fff;box-shadow:0 1px 3px #174b3420}
+#repairMarkLevel{position:absolute;z-index:7;display:flex;flex-direction:column;align-items:flex-start;gap:7px;width:max-content;max-width:calc(100% - 16px);padding:10px;border:1px solid var(--line-strong);border-radius:10px;background:var(--paper);box-shadow:0 6px 24px #221d182b;font-size:11px;line-height:1.5}
+#repairMarkLevel>span{color:var(--muted);font-size:10px}
 .repair-accept-region{padding:4px 8px;font-size:11px;color:var(--accent);border-color:var(--accent);background:var(--paper);white-space:nowrap}
 .repair-compare-group.bump .repair-compare-title{border-left-color:#338fc9}
 .repair-compare-pair{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px;padding:6px;flex:1;min-height:0}
@@ -344,8 +365,8 @@ label.repair-snap input[type=checkbox]{width:14px;height:14px;margin:0;accent-co
 .repair-legend i.bump{border-color:#338fc9;background:#559ddd18}
 .repair-legend i.pending{border-color:#7b8787;border-style:dashed;background:transparent}
 .repair-legend>p{display:none}
-.repair-mark-row.crease button:first-child{border-left:3px solid #d58b23}
-.repair-mark-row.bump button:first-child{border-left:3px solid #338fc9}
+.repair-mark-row.crease>button:first-child{border-left:3px solid #d58b23}
+.repair-mark-row.bump>button:first-child{border-left:3px solid #338fc9}
 #repairEmpty{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);text-align:center;line-height:2;color:var(--muted);font-size:13px;width:90%}
 @media(max-width:750px){.stage-switch{margin-left:4px}.stage-switch button{font-size:10px;padding:3px 5px}.brand small{display:none}}
 @media(max-width:1050px){main{--library-track:225px;--settings-open:250px}.settings{padding:14px 11px}.item img{width:33px}.filename-row{gap:6px}#resolution{font-size:9px}.brand small{display:none}}

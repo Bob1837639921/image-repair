@@ -8,6 +8,8 @@ $('editor').append(repairPane);
 let repairSelectionKind=null;
 let repairMarks=[],repairActiveMark=null,repairMarkSignature=null,repairMarkSaveChain=Promise.resolve();
 let repairReadOnly=false,repairDrawKind=null;
+const repairLevelChoices=new Map();
+let repairLevelEditorId=null;
 const repairCanvasPane=document.createElement('section');repairCanvasPane.className='repair-canvas-pane';
 $('repairViewport').before(repairCanvasPane);
 const repairSourceBar=document.createElement('div');repairSourceBar.className='repair-source-bar';repairSourceBar.innerHTML='<div role="group" aria-label="图片版本" hidden><button id="repairWorkView" class="active" aria-pressed="true">当前工作图</button><button id="repairOriginalView" aria-pressed="false">原裁剪图</button></div><span id="repairWorkStatus">原裁剪图始终保留</span>';
@@ -42,17 +44,23 @@ function saveRepairMarks(){
 function paintRepairMarks(){
  repairMarkLayer.replaceChildren();$('repairMarksList').replaceChildren();
  repairMarks.forEach((mark,index)=>{
+  const level=repairLevelChoices.get(mark.id)||mark.level||'standard',levelName={light:'轻度',standard:'标准',strong:'加强'}[level];
   const name=`${index+1} · ${mark.kind==='blemish'?'瑕疵去除':mark.kind==='crease'?'折痕':'凸起'}`,box=document.createElement('div');box.className='repair-mark '+mark.kind+(mark.brush?' brush':'')+(mark.id===repairActiveMark?' active':'');
   const [x1,y1,x2,y2]=mark.region;Object.assign(box.style,{left:x1*100+'%',top:y1*100+'%',width:(x2-x1)*100+'%',height:(y2-y1)*100+'%'});
-  const badge=document.createElement('button');badge.textContent=name;badge.onpointerdown=e=>e.stopPropagation();badge.onclick=()=>selectRepairMark(mark.id);badge.oncontextmenu=e=>showRepairContextMenu(e,mark.id);box.append(badge);repairMarkLayer.append(box);
+  const badge=document.createElement('button');badge.textContent=name+' · '+levelName;badge.onpointerdown=e=>e.stopPropagation();badge.onclick=()=>selectRepairMark(mark.id);badge.oncontextmenu=e=>showRepairContextMenu(e,mark.id);box.append(badge);repairMarkLayer.append(box);
   const row=document.createElement('div');row.className='repair-mark-row '+mark.kind;const choose=document.createElement('button');choose.textContent=name;choose.onclick=()=>selectRepairMark(mark.id);choose.classList.toggle('active',mark.id===repairActiveMark);
-  const remove=document.createElement('button');remove.textContent='×';remove.setAttribute('aria-label','删除标记 '+(index+1));remove.onclick=()=>deleteRepairMark(mark.id);choose.oncontextmenu=e=>showRepairContextMenu(e,mark.id);row.append(choose,remove);$('repairMarksList').append(row);
+  const grade=document.createElement('button');grade.className='repair-mark-grade';grade.textContent=levelName;grade.classList.toggle('pending',repairLevelChoices.has(mark.id));grade.setAttribute('aria-label','修改标记 '+(index+1)+' 强度：'+levelName);grade.setAttribute('aria-expanded',String(repairLevelEditorId===mark.id));grade.disabled=repairBusy||repairReadOnly;grade.title=repairLevelChoices.has(mark.id)?'等级已调整，待重新修复':'修改此处修复强度';
+  grade.onclick=()=>{if(repairBusy||repairReadOnly)return;repairLevelEditorId=repairLevelEditorId===mark.id?null:mark.id;paintRepairMarks()};
+  const remove=document.createElement('button');remove.textContent='×';remove.setAttribute('aria-label','删除标记 '+(index+1));remove.onclick=()=>deleteRepairMark(mark.id);choose.oncontextmenu=e=>showRepairContextMenu(e,mark.id);row.append(choose,grade,remove);
+  if(repairLevelEditorId===mark.id&&!repairReadOnly&&!repairBusy){const editor=document.createElement('div');editor.className='repair-mark-grade-editor';editor.append(makeRepairLevelControl(mark));row.append(editor)}
+  $('repairMarksList').append(row);
  });
  $('repairMarksCount').textContent=`已标记 ${repairMarks.length} 处`;
  $('repairMarksPanel').hidden=repairMarks.length===0;
+ if(typeof syncRepairLevelControls==='function')syncRepairLevelControls();
 }
-function selectRepairMark(id){if(repairBusy)return;const mark=repairMarks.find(x=>x.id===id);if(!mark)return;repairActiveMark=id;repairSelection=mark.brush?null:[...mark.region];repairSelectionKind=mark.kind;$('repairKind').value=mark.kind;paintRepairSelection();paintRepairMarks();const i=repairCompareGroups.findIndex(g=>g.markId===id);if(repairDraft&&i>=0){activateRepairCompare(i);repairCompareGroups[i].card.scrollIntoView({block:'nearest',behavior:'smooth'})}}
-function loadRepairMarks(info){closeRepairContextMenu();repairMarks=(info.marks||[]).map(mark=>({...mark,region:[...mark.region]}));repairMarkSignature=info.signature;repairActiveMark=null;$('repairKind').value='';paintRepairMarks();$('repairMarksStatus').hidden=!!info.signature;if(!info.signature)$('repairMarksStatus').textContent='后台待更新：请重启工具后使用多区域标记'}
+function selectRepairMark(id){if(repairBusy)return;repairLevelEditorId=null;focusRepairRegion(id);const i=repairCompareGroups.findIndex(g=>g.markId===id);if(repairDraft&&i>=0){activateRepairCompare(i);repairCompareGroups[i].card.scrollIntoView({block:'nearest',behavior:'smooth'})}}
+function loadRepairMarks(info){repairLevelEditorId=null;closeRepairContextMenu();repairMarks=(info.marks||[]).map(mark=>({...mark,region:[...mark.region]}));repairMarkSignature=info.signature;repairActiveMark=null;$('repairKind').value='';paintRepairMarks();$('repairMarksStatus').hidden=!!info.signature;if(!info.signature)$('repairMarksStatus').textContent='后台待更新：请重启工具后使用多区域标记'}
 const repairKindPicker=document.createElement('div');repairKindPicker.id='repairKindPicker';repairKindPicker.hidden=true;repairKindPicker.setAttribute('role','group');repairKindPicker.setAttribute('aria-label','选择这次框选的修复类型');repairKindPicker.innerHTML='<span id="repairKindPrompt">这个选区需要修复什么？</span><div><button id="repairChooseCrease" aria-pressed="false">折痕</button><button id="repairChooseBump" aria-pressed="false">凸起</button><button id="repairCancelSelection" class="danger" aria-label="删除当前选框">删除选框</button></div>';repairPane.append(repairKindPicker);
 const chooseBlemish=document.createElement('button');chooseBlemish.id='repairChooseBlemish';chooseBlemish.textContent='瑕疵去除';chooseBlemish.setAttribute('aria-pressed','false');chooseBlemish.title='强修复：用于允许替换纹理的颗粒、污点或空白纸面';$('repairCancelSelection').before(chooseBlemish);chooseBlemish.onclick=()=>chooseRepairKind('blemish');
 function showRepairKindPicker(){
@@ -62,12 +70,25 @@ function showRepairKindPicker(){
  $('repairKindPrompt').textContent=repairSelectionKind?'本次选区：'+(repairSelectionKind==='blemish'?'瑕疵去除':repairSelectionKind==='crease'?'折痕':'凸起'):'请选择选框类型';
  for(const [id,kind] of [['repairChooseCrease','crease'],['repairChooseBump','bump'],['repairChooseBlemish','blemish']]){$(id).classList.toggle('active',kind===repairSelectionKind);$(id).setAttribute('aria-pressed',String(kind===repairSelectionKind))}
 }
-function chooseRepairKind(kind){const brushMark=repairMarks.find(x=>x.id===repairActiveMark&&x.brush);if(brushMark){if(repairBusy)return;if(repairDraft&&repairResultRegions.some(mark=>mark.id===brushMark.id))return toast('请先采用或放弃此处预览，再修改类型');brushMark.kind=kind;repairSelectionKind=kind;$('repairKind').value=kind;repairKindPicker.hidden=true;paintRepairMarks();saveRepairMarks();return}if(repairBusy||!repairSelection)return;if(repairDraft&&repairResultRegions.some(mark=>mark.id===repairActiveMark))return toast('请先采用或放弃此处预览，再修改类型');if(!repairMarkSignature)return toast('请先重启工具后台以启用标记保存');if((repairSelection[2]-repairSelection[0])*repairSize[0]<4||(repairSelection[3]-repairSelection[1])*repairSize[1]<4)return toast('选区太小，请稍微扩大后标记');repairSelectionKind=kind;$('repairKind').value=kind;let mark=repairMarks.find(x=>x.id===repairActiveMark);if(mark){mark.region=[...repairSelection];mark.kind=kind}else{mark={id:Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,10),region:[...repairSelection],kind};repairMarks.push(mark);repairActiveMark=mark.id}repairKindPicker.hidden=true;paintRepairSelection();paintRepairMarks();saveRepairMarks()}
+function chooseRepairKind(kind){
+ const brushMark=repairMarks.find(x=>x.id===repairActiveMark&&x.brush);
+ if(brushMark){if(repairBusy)return;if(repairDraft&&repairResultRegions.some(mark=>mark.id===brushMark.id))return toast('请先采用或放弃此处预览，再修改类型');brushMark.kind=kind;repairSelectionKind=kind;$('repairKind').value=kind;repairKindPicker.hidden=true;paintRepairMarks();saveRepairMarks();return}
+ if(repairBusy||!repairSelection)return;
+ if(repairDraft&&repairResultRegions.some(mark=>mark.id===repairActiveMark))return toast('请先采用或放弃此处预览，再修改类型');
+ if(!repairMarkSignature)return toast('请先重启工具后台以启用标记保存');
+ if((repairSelection[2]-repairSelection[0])*repairSize[0]<4||(repairSelection[3]-repairSelection[1])*repairSize[1]<4)return toast('选区太小，请稍微扩大后标记');
+ repairSelectionKind=kind;$('repairKind').value=kind;
+ let mark=repairMarks.find(x=>x.id===repairActiveMark);const created=!mark;
+ if(mark){mark.region=[...repairSelection];mark.kind=kind}else{mark={id:Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,10),region:[...repairSelection],kind,level:'standard'};repairMarks.push(mark);repairActiveMark=mark.id}
+ repairKindPicker.hidden=true;paintRepairSelection();paintRepairMarks();saveRepairMarks();
+ if(created)showRepairLevelPrompt(mark.id);
+}
 $('repairChooseCrease').onclick=()=>chooseRepairKind('crease');$('repairChooseBump').onclick=()=>chooseRepairKind('bump');
 $('repairCancelSelection').onclick=()=>deleteRepairMark(repairActiveMark);
 const repairContextMenu=document.createElement('div');repairContextMenu.id='repairContextMenu';repairContextMenu.hidden=true;repairContextMenu.setAttribute('role','menu');repairContextMenu.setAttribute('aria-label','选框操作');
 repairContextMenu.innerHTML='<span class="repair-context-title">选框操作</span><button type="button" data-kind="crease" role="menuitemradio">切换为折痕</button><button type="button" data-kind="bump" role="menuitemradio">切换为凸起</button><button type="button" data-kind="blemish" role="menuitemradio">切换为瑕疵去除</button><button type="button" id="repairDeleteMark" class="danger" role="menuitem">删除选框</button>';
 document.body.append(repairContextMenu);
+const repairContextLevels=document.createElement('div');repairContextLevels.id='repairContextLevels';$('repairDeleteMark').before(repairContextLevels);
 let repairContextTarget=null;
 function closeRepairContextMenu(){repairContextMenu.hidden=true;repairContextTarget=null}
 function deleteRepairMark(id){
@@ -77,6 +98,81 @@ function deleteRepairMark(id){
  if(id===null||repairActiveMark===id){repairActiveMark=null;repairSelection=null;repairSelectionKind=null;repairKindPicker.hidden=true;$('repairKind').value='';$('repairRegionText').textContent='尚未框选';paintRepairSelection()}
  paintRepairMarks();if(exists)saveRepairMarks();
 }
+function deleteAllRepairMarks(){
+ if(repairBusy)return toast('请等待本次修复完成');
+ if(repairReadOnly)return toast('请切换到当前工作图后删除标记');
+ if(repairDraft)return toast('请先采用或放弃当前修复预览，再删除全部标记');
+ const count=repairMarks.length;
+ repairMarks=[];repairActiveMark=null;repairSelection=null;repairSelectionKind=null;
+ repairKindPicker.hidden=true;closeRepairContextMenu();$('repairKind').value='';
+ $('repairRegionText').textContent='尚未框选';paintRepairSelection();paintRepairMarks();
+ if(count)saveRepairMarks();
+ toast('已删除当前图片的全部修复标记');
+}
+function makeRepairLevelControl(mark){
+ const group=document.createElement('div');group.className='repair-level-control';group.dataset.markId=mark.id;group.setAttribute('role','group');group.setAttribute('aria-label','此处修复强度');
+ const chosen=repairLevelChoices.get(mark.id)||mark.level||'standard';
+ for(const [level,label] of [['light','轻度'],['standard','标准'],['strong','加强']]){
+  const button=document.createElement('button');button.type='button';button.textContent=label;button.dataset.level=level;
+  button.classList.toggle('active',chosen===level);button.setAttribute('aria-pressed',String(chosen===level));
+  button.onclick=event=>{event.stopPropagation();setRepairMarkLevel(mark.id,level)};group.append(button);
+ }
+ return group;
+}
+function syncRepairLevelControls(){
+ const panel=$('repairMarkLevel');if(!panel)return;
+ if(panel.hidden)return;
+ const mark=repairMarks.find(m=>m.id===panel.dataset.markId);
+ if(!mark||repairActiveMark!==mark.id||repairBusy||repairReadOnly){panel.hidden=true;return}
+ positionRepairLevelPrompt(mark);
+}
+function repairLevelPlacement(rect,view,size){
+ const gap=10,clamp=(v,a,b)=>Math.max(a,Math.min(v,b));
+ const minX=view.left+8,maxX=view.right-size.width-8,minY=view.top+8,maxY=view.bottom-size.height-8;
+ if(maxX<minX||maxY<minY)return null;
+ const y=clamp((rect.top+rect.bottom-size.height)/2,minY,maxY),x=clamp(rect.left,minX,maxX);
+ for(const [left,top] of [[rect.right+gap,y],[rect.left-size.width-gap,y],[x,rect.bottom+gap],[x,rect.top-size.height-28]]){
+  if(left>=minX&&left<=maxX&&top>=minY&&top<=maxY&&!(left<rect.right&&left+size.width>rect.left&&top<rect.bottom&&top+size.height>rect.top))return {left,top};
+ }
+ return null;
+}
+function positionRepairLevelPrompt(mark){
+ const panel=$('repairMarkLevel'),wrap=$('repairWrap').getBoundingClientRect(),view=$('repairViewport').getBoundingClientRect(),pane=repairPane.getBoundingClientRect();
+ const [x1,y1,x2,y2]=mark.region,rect={left:wrap.left+x1*wrap.width,right:wrap.left+x2*wrap.width,top:wrap.top+y1*wrap.height,bottom:wrap.top+y2*wrap.height};
+ const position=repairLevelPlacement(rect,{left:view.left,right:view.right,top:view.top+56,bottom:view.bottom},panel.getBoundingClientRect());
+ if(position){panel.style.left=position.left-pane.left+'px';panel.style.top=position.top-pane.top+'px';return}
+ panel.hidden=true;repairLevelEditorId=mark.id;paintRepairMarks();
+ if(typeof setSettingsCollapsed==='function')setSettingsCollapsed(false);
+ const row=[...$('repairMarksList').children].find(el=>el.querySelector('.repair-level-control')?.dataset.markId===mark.id);
+ row?.scrollIntoView({block:'nearest'});
+}
+function showRepairLevelPrompt(id){
+ if(repairBusy||repairReadOnly)return;
+ const mark=repairMarks.find(m=>m.id===id);if(!mark)return;
+ const panel=$('repairMarkLevel');panel.replaceChildren();panel.dataset.markId=id;
+ const label=document.createElement('span');label.textContent='修复强度 · 默认标准';panel.append(label,makeRepairLevelControl(mark));panel.hidden=false;
+ positionRepairLevelPrompt(mark);
+}
+function setRepairMarkLevel(id,level){
+ if(repairBusy||repairReadOnly)return;
+ const mark=repairMarks.find(m=>m.id===id);if(!mark)return;
+ const candidate=repairResultRegions.find(m=>m.id===id);
+ if(repairDraft&&candidate){
+  if((candidate.level||'standard')===level)repairLevelChoices.delete(id);else repairLevelChoices.set(id,level);
+ }else{mark.level=level;saveRepairMarks()}
+ const prompt=$('repairMarkLevel');if(prompt)prompt.hidden=true;
+ if(typeof closeRepairContextMenu==='function')closeRepairContextMenu();
+ repairLevelEditorId=null;
+ document.querySelectorAll('.repair-level-control').forEach(group=>{
+  if(group.dataset.markId!==id)return;
+  const chosen=repairLevelChoices.get(id)||mark.level||'standard';
+  group.querySelectorAll('button').forEach(button=>{button.classList.toggle('active',button.dataset.level===chosen);button.setAttribute('aria-pressed',String(button.dataset.level===chosen))});
+ });
+ syncRepairLevelControls();
+ if(typeof paintRepairMarks==='function')paintRepairMarks();
+ const card=repairCompareGroups.find(g=>g.markId===id)?.card;
+ if(card){card.classList.toggle('level-pending',repairLevelChoices.has(id));const note=card.querySelector('.repair-level-note');if(note)note.textContent=repairLevelChoices.has(id)?'待重新修复':'此处强度'}
+}
 function showRepairContextMenu(event,id){
  event.preventDefault();event.stopPropagation();closeRepairContextMenu();
  if(repairReadOnly)return toast('原裁剪图仅供对照，请切换到当前工作图编辑');
@@ -84,12 +180,19 @@ function showRepairContextMenu(event,id){
  const mark=repairMarks.find(mark=>mark.id===id);
  if(id!==null&&!mark)return;
  if(mark)selectRepairMark(id);
+ repairContextLevels.replaceChildren();repairContextLevels.hidden=!mark;
+ if(mark){const label=document.createElement('span');label.textContent='修复强度';repairContextLevels.append(label,makeRepairLevelControl(mark))}
  repairKindPicker.hidden=true;repairContextTarget={item:current.id,id};
  for(const button of repairContextMenu.querySelectorAll('[data-kind]'))button.setAttribute('aria-checked',String(button.dataset.kind===repairSelectionKind));
  repairContextMenu.hidden=false;
  const bounds=repairContextMenu.getBoundingClientRect();
  repairContextMenu.style.left=Math.max(6,Math.min(event.clientX,window.innerWidth-bounds.width-6))+'px';
  repairContextMenu.style.top=Math.max(6,Math.min(event.clientY,window.innerHeight-bounds.height-6))+'px';
+ if(mark){
+  const wrap=$('repairWrap').getBoundingClientRect(),view=$('repairViewport').getBoundingClientRect(),[x1,y1,x2,y2]=mark.region;
+  const position=repairLevelPlacement({left:wrap.left+x1*wrap.width,right:wrap.left+x2*wrap.width,top:wrap.top+y1*wrap.height,bottom:wrap.top+y2*wrap.height},view,bounds);
+  if(position){repairContextMenu.style.left=position.left+'px';repairContextMenu.style.top=position.top+'px'}
+ }
  repairContextMenu.querySelector('button').focus({preventScroll:true});
 }
 $('repairViewport').addEventListener('contextmenu',event=>{
@@ -137,13 +240,19 @@ blemishTool.onclick=()=>{if(repairReadOnly)return toast('请先切换到当前�
 const repairLegend=document.createElement('div');repairLegend.className='repair-legend';repairLegend.setAttribute('aria-label','选框颜色说明');repairLegend.innerHTML='<strong>选框说明</strong><div><span><i class="crease" aria-hidden="true"></i>橙色 · 折痕</span><span><i class="bump" aria-hidden="true"></i>蓝色 · 凸起</span></div><p><i class="pending" aria-hidden="true"></i>灰色虚线 · 尚未选择类型</p>';repairSettings.prepend(repairLegend);
 const blemishLegend=document.createElement('span');blemishLegend.innerHTML='<i class="blemish" aria-hidden="true"></i>紫色 · 瑕疵去除（强修复）';repairLegend.querySelector('div').append(blemishLegend);
 const repairMarksPanel=document.createElement('div');repairMarksPanel.id='repairMarksPanel';repairMarksPanel.innerHTML='<strong id="repairMarksCount">已标记 0 处</strong><div id="repairMarksList"></div><p id="repairMarksStatus" class="repair-help">标记后可继续框选，全部标好再点击修复</p>';$('repairRegionText').before(repairMarksPanel);
+const repairMarkLevel=document.createElement('div');repairMarkLevel.id='repairMarkLevel';repairMarkLevel.hidden=true;repairMarkLevel.setAttribute('role','group');repairMarkLevel.setAttribute('aria-label','首次标记修复强度');repairMarkLevel.onpointerdown=event=>event.stopPropagation();repairPane.append(repairMarkLevel);
+document.addEventListener('pointerdown',event=>{if(!repairMarkLevel.contains(event.target))repairMarkLevel.hidden=true},true);
+document.addEventListener('scroll',()=>{if(!repairMarkLevel.hidden)syncRepairLevelControls()},true);window.addEventListener('resize',()=>{if(!repairMarkLevel.hidden)syncRepairLevelControls()});
+const repairMarksHead=document.createElement('div');repairMarksHead.className='repair-marks-head';
+const repairDeleteAll=document.createElement('button');repairDeleteAll.id='repairDeleteAll';repairDeleteAll.type='button';repairDeleteAll.className='danger';repairDeleteAll.textContent='删除全部';repairDeleteAll.title='删除当前图片的所有选框和涂抹标记';repairDeleteAll.onclick=deleteAllRepairMarks;
+repairMarksHead.append($('repairMarksCount'),repairDeleteAll);repairMarksPanel.prepend(repairMarksHead);
 $('repairResultActions').append($('repairDraftActions'));
 const repairRegenerate=document.createElement('button');repairRegenerate.id='repairRegenerate';repairRegenerate.textContent='重新修复';
 $('repairAccept').textContent='采用剩余全部';$('repairDiscard').textContent='放弃剩余预览';
 $('repairAccept').after(repairRegenerate);
 repairRegenerate.title='按当前标记和上次的修复方式重新生成预览；AI 修复会再次调用已配置的服务';
 $('repairPreview').textContent='常规修复';
-function resetRepairResult(){++repairResultSerial;repairResult.hidden=true;repairPane.classList.remove('has-result');repairResultImage=null;repairResultRegion=null;repairResultFull=false;$('repairDraftActions').hidden=true;$('repairPreview').disabled=false;if($('repairAI'))$('repairAI').disabled=false}
+function resetRepairResult(){repairLevelChoices.clear();++repairResultSerial;repairResult.hidden=true;repairPane.classList.remove('has-result');repairResultImage=null;repairResultRegion=null;repairResultFull=false;$('repairDraftActions').hidden=true;$('repairPreview').disabled=false;if($('repairAI'))$('repairAI').disabled=false}
 function setRepairResultState(state,message){
  repairResult.hidden=false;repairPane.classList.add('has-result');repairResult.dataset.state=state;
  $('repairResultBody').setAttribute('aria-busy',String(state==='loading'));
@@ -165,6 +274,11 @@ function paintRepairResult(){
   card.classList.toggle('full-work',repairResultFull);
   const title=document.createElement('strong');title.className='repair-compare-title';title.textContent=repairResultFull?'完整作品':`${index+1} · ${mark?.kind==='blemish'?'瑕疵去除':mark?.kind==='bump'?'凸起':'折痕'}`;
   if(mark?.id){const actions=document.createElement('div');actions.className='repair-region-actions';for(const [label,action] of [['采用此处','accept-region'],['重新修复','retry-region'],['AI 修复','ai-region'],['放弃此处','discard-region']]){const button=document.createElement('button');button.className='repair-accept-region';button.textContent=label;button.onclick=event=>{event.stopPropagation();acceptRepairRegion(mark.id,action)};if(action==='retry-region')button.title='仅重新生成这一处；AI 修复会再次调用服务';if(action==='ai-region')button.title='仅将此处交给 AI，成功后替换此处候选，失败保留原候选；可能产生调用费用';actions.append(button)}title.append(actions)}
+  if(mark?.id){
+   const controls=document.createElement('div');controls.className='repair-level-row';
+   const note=document.createElement('span');note.className='repair-level-note';note.textContent=repairLevelChoices.has(mark.id)?'待重新修复':'此处强度';
+   controls.append(note,makeRepairLevelControl(mark));title.append(controls);card.classList.toggle('level-pending',repairLevelChoices.has(mark.id));
+  }
   const pair=document.createElement('div');pair.className='repair-compare-pair';
   const group={card,markId:mark?.id,views:[],canvases:[],scale:'fit'};
   for(const [label,image] of [['修复前',repairResultBeforeImage],['修复后',im]]){
@@ -189,16 +303,20 @@ function paintRepairResult(){
 function activateRepairCompare(index){repairCompareActive=index;repairCompareGroups.forEach((group,i)=>group.card.classList.toggle('active',i===index));$('repairComparePercent').textContent=Math.round(repairCompareCurrentScale()*100)+'%'}
 function focusRepairRegion(id){
  const mark=repairMarks.find(m=>m.id===id);if(!mark)return;
- repairActiveMark=id;repairSelection=mark.brush?null:[...mark.region];repairSelectionKind=mark.kind;paintRepairSelection();paintRepairMarks();
- if(!repairReadOnly){const wrap=$('repairWrap').getBoundingClientRect(),view=$('repairViewport'),bounds=view.getBoundingClientRect(),[x1,y1,x2,y2]=mark.region;view.scrollLeft+=wrap.left+(x1+x2)/2*wrap.width-(bounds.left+bounds.right)/2;view.scrollTop+=wrap.top+(y1+y2)/2*wrap.height-(bounds.top+bounds.bottom)/2}
+ repairActiveMark=id;repairSelection=mark.brush?null:[...mark.region];repairSelectionKind=mark.kind;$('repairKind').value=mark.kind;paintRepairSelection();paintRepairMarks();
+ const wrap=$('repairWrap').getBoundingClientRect(),view=$('repairViewport'),bounds=view.getBoundingClientRect(),[x1,y1,x2,y2]=mark.region;
+ if(view.scrollWidth>view.clientWidth+1)view.scrollLeft+=wrap.left+(x1+x2)/2*wrap.width-(bounds.left+bounds.right)/2;
+ if(view.scrollHeight>view.clientHeight+1)view.scrollTop+=wrap.top+(y1+y2)/2*wrap.height-(bounds.top+bounds.bottom)/2;
 }
 async function acceptRepairRegion(markId,action='accept-region'){
  if(repairBusy||!repairDraft||!current?.confirmed)return;
+ if(action==='accept-region'&&repairLevelChoices.has(markId))return toast('此处等级已调整，请先点击“重新修复”后再采用');
  repairBusy=true;const id=current.id;
  repairResult.querySelectorAll('button').forEach(button=>button.disabled=true);
  try{
   await repairMarkSaveChain;
-  const result=await api('repair/'+(action==='ai-region'?'retry-region':action),{id,draft:repairDraft,mark_id:markId,...(action==='ai-region'?{method:'ai'}:{})});
+  const result=await api('repair/'+(action==='ai-region'?'retry-region':action),{id,draft:repairDraft,mark_id:markId,...(action==='ai-region'?{method:'ai'}:{}),...(['retry-region','ai-region'].includes(action)&&repairLevelChoices.has(markId)?{level:repairLevelChoices.get(markId)}:{})});
+  repairLevelChoices.delete(markId);
   replace(result.item);repairDraft=result.draft;repairResultRegions=result.regions;repairSelection=null;repairSelectionKind=null;
   loadRepairMarks({marks:result.item.repair_marks?.regions||[],signature:repairMarkSignature});paintRepairSelection();
   $('repairUndo').disabled=!result.item.repair_state?.layers?.length;$('repairState').textContent=`已采用 ${result.item.repair_state?.layers?.length||0} 次修复`;
@@ -492,9 +610,10 @@ function startRepairBrushStroke(e){
   if(current?.id!==itemId||workStage!=='repair'){paintRepairMarks();return}
   if(eraser){paintRepairMarks();if(erased)saveRepairMarks();return}
   if(ev.type==='pointercancel'||!live){paintRepairMarks();return}
-  const mark={id:live.id,kind:live.kind,region:repairBrushRegion(live.brush),brush:live.brush};
+  const mark={id:live.id,kind:live.kind,level:'standard',region:repairBrushRegion(live.brush),brush:live.brush};
   repairMarks.push(mark);repairActiveMark=mark.id;repairSelectionKind=mark.kind;$('repairKind').value=mark.kind;
   paintRepairMarks();saveRepairMarks();
+  showRepairLevelPrompt(mark.id);
   if(mark.kind==='crease'&&repairSnap)snapRepairMark(mark.id);
  };
  view.addEventListener('pointermove',move);view.addEventListener('pointerup',up);view.addEventListener('pointercancel',up);view.addEventListener('lostpointercapture',up);
@@ -518,6 +637,7 @@ $('repairViewport').addEventListener('pointermove',e=>{
 $('repairViewport').addEventListener('pointerleave',()=>{repairBrushCursor.hidden=true});
 setRepairTool('brush');
 $('repairPreview').onclick=async()=>{
+ if(repairDraft&&repairLevelChoices.size)return toast('有折痕等级已调整，请先在对应卡片点击“重新修复”');
  if(repairBusy)return;if(repairDraft&&$('repairMethod').value!=='ai')return toast('当前已有预览，可逐处采用或直接点击 AI 修复');if(!repairMarks.length&&!repairSelection)return toast('请先框选并分类需要修复的位置');
  if(repairSelection&&!repairSelectionKind){showRepairKindPicker();return toast('请先为刚框选的区域选择折痕或凸起')}
  repairKindPicker.hidden=true;
@@ -536,7 +656,7 @@ $('repairPreview').onclick=async()=>{
  }catch(e){if(serial===repairResultSerial){if(previous){repairDraft=previous.draft;repairResultImage=previous.image;repairResultBeforeImage=previous.before;repairResultRegions=previous.regions;repairResultRegion=previous.region;repairResultFull=previous.full;paintRepairResult();setRepairResultState('ready');toast('AI 修复未完成，已保留原预览：'+e.message)}else{repairDraft=null;setRepairResultState('error',e.message)}if(generatedDraft)await api('repair/discard',{id,draft:generatedDraft}).catch(()=>{})}}
  finally{repairBusy=false;$('repairPreview').disabled=!!repairDraft;$('repairPreview').textContent='常规修复';syncRepairWorkflow()}
 };
-async function repairAction(action){if(repairBusy||!current?.confirmed)return;repairBusy=true;const id=current.id;try{const item=await api('repair/'+action,{id,draft:repairDraft});replace(item);repairDraft=null;repairSelection=null;await selectRepairAfterBusy(id)}catch(e){toast(e.message)}finally{repairBusy=false}}
+async function repairAction(action){if(repairBusy||!current?.confirmed)return;if(action==='accept'&&repairLevelChoices.size)return toast('有折痕等级尚未生效，请先逐处点击“重新修复”');repairBusy=true;const id=current.id;try{const item=await api('repair/'+action,{id,draft:repairDraft});replace(item);repairDraft=null;repairSelection=null;await selectRepairAfterBusy(id)}catch(e){toast(e.message)}finally{repairBusy=false}}
 async function selectRepairAfterBusy(id){repairBusy=false;await selectRepair(id);repairBusy=true}
 $('repairAccept').onclick=()=>repairAction('accept');$('repairUndo').onclick=()=>repairAction('undo');$('repairRedo').onclick=()=>repairAction('redo');
 $('repairComplete').onclick=async()=>{if(repairDraft)return toast('请先采用或放弃修复预览');await repairAction('complete')};
@@ -592,6 +712,7 @@ aiRepairButton.onclick=()=>startRepairWith('ai');
 $('repairResultRetry').onclick=()=>startRepairWith(lastRepairMethod);
 repairRegenerate.onclick=async()=>{
  if(repairBusy)return;
+ if(repairLevelChoices.size)return toast('有折痕等级已调整，请先在对应卡片点击“重新修复”');
  if(!await discardRepairPreview())return;
  return startRepairWith(lastRepairMethod);
 };

@@ -4,11 +4,12 @@ function $(id){if(!nodes.has(id))nodes.set(id,{value:id==='repairStrength'?'.65'
 let resolveRequest,rejectRequest,leftLoads=0;
 const context=vm.createContext({$,current:{id:'sample',revision:3},workStage:'repair',repairBusy:false,repairDraft:null,repairSelection:[.2,.3,.4,.5],repairResultSerial:0,repairResultImage:null,repairResultRegion:null,repairResultFull:false,toast(){},setRepairResultState:s=>states.push(s),paintRepairResult(){},showRepairImage(){leftLoads++},api:()=>new Promise((resolve,reject)=>{resolveRequest=resolve;rejectRequest=reject}),decodedImage:async()=>({naturalWidth:500,naturalHeight:1000})});
 context.syncRepairWorkflow=()=>{};
+context.repairLevelChoices=new Map();
 vm.runInContext(source.slice(source.indexOf("$('repairPreview').onclick=async"),source.indexOf('async function repairAction')),context);
 let typePrompts=0;const bodies=[],baseApi=context.api;
 Object.assign(context,{repairSelectionKind:null,repairMarks:[],repairMarkSaveChain:Promise.resolve(),repairKindPicker:{hidden:true},showRepairKindPicker(){typePrompts++},api:(path,body)=>{bodies.push({...body,path});return path==='repair/discard'?Promise.resolve({discarded:true}):baseApi()}});
 (async()=>{
- const calls=[];const rc=vm.createContext({repairRegenerate:{},repairBusy:false,lastRepairMethod:'ai',discardRepairPreview:async()=>{calls.push('discard');return true},startRepairWith:async method=>calls.push(method)});
+ const calls=[];const rc=vm.createContext({repairRegenerate:{},repairBusy:false,repairLevelChoices:new Map(),lastRepairMethod:'ai',discardRepairPreview:async()=>{calls.push('discard');return true},startRepairWith:async method=>calls.push(method)});
  vm.runInContext(source.slice(source.indexOf('repairRegenerate.onclick='),source.indexOf('const selectBeforePendingRestore=')),rc);
  await rc.repairRegenerate.onclick();assert.deepEqual(calls,['discard','ai']);
  rc.discardRepairPreview=async()=>false;await rc.repairRegenerate.onclick();assert.equal(calls.length,2);
