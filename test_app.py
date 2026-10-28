@@ -186,6 +186,10 @@ class GeometryTests(unittest.TestCase):
                 def post(path,body,raw=False):
                     req=urllib.request.Request(base+'/api/'+path,data=body if raw else json.dumps(body).encode(),headers={'X-App-Token':token},method='POST')
                     return json.load(urllib.request.urlopen(req))
+                storage=json.load(urllib.request.urlopen(base+'/api/settings/storage'))
+                self.assertEqual(Path(storage['path']),Path(d));self.assertFalse(storage['can_change'])
+                self.assertIn('文件存储',urllib.request.urlopen(base+'/settings.js').read().decode('utf-8'))
+                with self.assertRaises(urllib.error.HTTPError):post('settings/storage',{'path':str(Path(d)/'new')})
                 with self.assertRaises(urllib.error.HTTPError):
                     urllib.request.urlopen(urllib.request.Request(base+'/api/export',data=b'{}',method='POST'))
                 buf=io.BytesIO(); Image.new('RGB',(300,1800),'#d9cfb4').save(buf,'PNG')

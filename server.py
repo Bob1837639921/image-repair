@@ -16,9 +16,11 @@ from urllib.parse import urlparse, parse_qs, unquote
 from imaging import load, render, detect, refine_native, validate, validate_trim, suggest_trim, automatic_process, artwork_aspect, FULL, DEFAULTS
 from repairing import RepairService, crop_signature
 from repair_batch import RepairBatch
+from data_store import data_directory
+from storage_settings import StorageSettings,choose_directory
 
 ROOT=Path(__file__).resolve().parent
-DATA=Path(os.environ.get('SCROLL_STUDIO_DATA',str(ROOT/'data')))
+DATA=data_directory(ROOT)
 DATA.mkdir(parents=True,exist_ok=True)
 (DATA/'originals').mkdir(exist_ok=True)
 (DATA/'previews').mkdir(exist_ok=True)
@@ -163,6 +165,18 @@ def export_worker(items, fmt):
     with LOCK: JOB.update(running=False,folder=str(folder))
 
 
+def activate_storage(folder):
+    global DATA,DB
+    with LOCK:
+        previous=DATA;DATA=Path(folder);DB=DATA/'project.json'
+        REPAIRS.folder=DATA/'repairs';REPAIRS.draft_path=REPAIRS.folder/'drafts.json';REPAIRS.config_path=DATA/'ai-connection.json'
+        BATCH.path=DATA/'repair-batch.json'
+        if JOB.get('folder') and Path(JOB['folder']).is_relative_to(previous):JOB['folder']=str(DATA/Path(JOB['folder']).relative_to(previous))
+
+
+STORAGE=StorageSettings(ROOT,DATA,activate_storage,lambda:JOB['running'] or PREPARE['running'] or BATCH.job['running'],environment_override=bool(os.environ.get('SCROLL_STUDIO_DATA','').strip()))
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self,*args): pass
 
@@ -180,13 +194,25 @@ class Handler(BaseHTTPRequestHandler):
         return self.headers.get('Host','').split(':')[0] in ('127.0.0.1','localhost')
 
     def do_GET(self):
+        if urlparse(self.path).path in ('/','/app.js','/style.css','/repair.js','/repair-batch.js','/settings.js','/repair-history.js','/api/settings/storage'):return self.get_request()
+        try:
+            with STORAGE.request():return self.get_request()
+        except ValueError as error:return self.respond({'error':str(error)},409)
+
+    def do_POST(self):
+        try:
+            with STORAGE.request():return self.post_request()
+        except ValueError as error:return self.respond({'error':str(error)},409)
+
+    def get_request(self):
         try:
             if not self.allowed(): return self.respond({'error':'非法主机'},403)
             u=urlparse(self.path); q=parse_qs(u.query)
             if u.path=='/':
                 return self.respond((ROOT/'static/index.html').read_text('utf-8').replace('__TOKEN__',TOKEN).encode(),mime='text/html; charset=utf-8')
-            if u.path in ('/app.js','/style.css','/repair.js','/repair-batch.js'):
+            if u.path in ('/app.js','/style.css','/repair.js','/repair-batch.js','/settings.js','/repair-history.js'):
                 return self.respond((ROOT/'static'/u.path[1:]).read_bytes(),mime='text/javascript; charset=utf-8' if u.path.endswith('js') else 'text/css; charset=utf-8')
+            if u.path=='/api/settings/storage':return self.respond(STORAGE.status())
             if u.path=='/api/items':
                 with LOCK: return self.respond(ITEMS)
             if u.path=='/api/job':
@@ -205,8 +231,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not item.get('confirmed'):raise ValueError('请先确认裁剪')
                 with REPAIRS.image(item) as image:size=list(image.size)
                 return self.respond(dict(size=size,state=REPAIRS.state(item),marks=REPAIRS.marks(item),signature=crop_signature(item)))
+            if u.path.startswith('/api/repair/history/'):
+                item=find(u.path.rsplit('/',1)[1])
+                if not item.get('confirmed'):raise ValueError('请先确认裁剪')
+                return self.respond(REPAIRS.history(item))
             if u.path.startswith('/api/repair/image/'):
-                payload=REPAIRS.payload(u.path.rsplit('/',1)[1],detail=q.get('detail')==['1'],before=q.get('before')==['1'],draft=q.get('draft',[None])[0])
+                payload=REPAIRS.payload(u.path.rsplit('/',1)[1],detail=q.get('detail')==['1'],before=q.get('before')==['1'],draft=q.get('draft',[None])[0],step=q.get('step',[None])[0],revision=q.get('revision',[None])[0])
                 return self.respond(payload,mime='image/png' if q.get('detail')==['1'] else 'image/jpeg',cache='no-store')
             if u.path.startswith('/api/image/'):
                 item=find(u.path.rsplit('/',1)[1]); mode=q.get('mode',['original'])[0]
@@ -217,7 +247,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond({'error':'没有此页面'},404)
         except Exception as e: self.respond({'error':str(e)},400)
 
-    def do_POST(self):
+    def post_request(self):
         try:
             if not self.allowed() or self.headers.get('X-App-Token')!=TOKEN:
                 return self.respond({'error':'请求未授权，请刷新页面'},403)
@@ -228,6 +258,8 @@ class Handler(BaseHTTPRequestHandler):
                 name=parse_qs(u.query).get('name',['image.jpg'])[0]
                 return self.respond(import_image(name,raw))
             body=json.loads(raw or b'{}')
+            if u.path=='/api/settings/storage':return self.respond(STORAGE.start(body.get('path')))
+            if u.path=='/api/settings/choose-folder':return self.respond(dict(path=choose_directory()))
             if u.path=='/api/repair/batch-start':return self.respond(BATCH.start(body.get('ids'),body.get('workers',2)))
             if u.path=='/api/repair/batch-cancel':return self.respond(BATCH.cancel())
             if u.path=='/api/repair/batch-dismiss':return self.respond(BATCH.dismiss(body['id'],body['draft']))

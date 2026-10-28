@@ -12,6 +12,125 @@ from imaging import np,cv2,FULL,DEFAULTS
 
 
 class RepairTests(unittest.TestCase):
+    def test_ai_shading_removes_patch_tint_and_linear_drift_but_keeps_local_repair(self):
+        from repairing import blend_ai_correction,calibrate_ai_paper
+        h,w=180,360;yy,xx=np.mgrid[:h,:w];before=np.zeros((h,w,3),'float32')+np.array([185,195,202],'float32')
+        local=12*np.exp(-((xx-180)/28)**2-((yy-90)/12)**2)
+        drift=np.stack([5+.02*yy,-2+.01*yy,8+.025*yy],axis=-1)
+        after=before+drift+local[:,:,None];allowed=np.ones((h,w),bool);allowed[70:90,100:110]=False
+        out=blend_ai_correction(before,after,allowed,'bump').astype(float)
+        self.assertTrue(np.array_equal(out[~allowed],before[~allowed]))
+        self.assertLess(float(np.abs(out[30:50,120:240]-before[30:50,120:240]).mean()),.2)
+        self.assertGreater(float((out[86:94,175:185]-before[86:94,175:185]).mean()),8)
+        self.assertLess(float(np.abs(out[90,180]/before[90,180]-np.mean(out[90,180]/before[90,180])).max()),.004)
+        mask=np.full((h,w,4),255,'uint8');mask[50:130,100:260,3]=0
+        corrected=calibrate_ai_paper(Image.fromarray(before.astype('uint8')),Image.fromarray(np.clip(after,0,255).astype('uint8')),Image.fromarray(mask))
+        self.assertLess(float(np.abs(corrected[20:40,30:70]-before[20:40,30:70]).mean()),1.2)
+    def test_ai_large_patch_has_smooth_wide_transition_without_touching_ink(self):
+        from repairing import blend_ai_correction
+        before=np.full((258,986,3),180.,dtype='float32');after=before+12;allowed=np.ones((258,986),bool);allowed[90:130,400:420]=False
+        result=blend_ai_correction(before,after,allowed).astype(float)
+        self.assertTrue(np.array_equal(result[~allowed],before[~allowed]));self.assertTrue(np.all(result[0]==180));self.assertTrue(np.all(result[:,-1]==180))
+        self.assertLess(float(result[1,100,0]-180),1);self.assertLess(float(result[20,100,0]-180),4)
+        self.assertGreater(float(result[129,200,0]-180),10)
+    def test_ai_image_results_accept_proxy_envelopes_and_reject_text_success(self):
+        from repairing import ai_image_result
+        encoded='aW1hZ2U='
+        samples=[dict(output=[dict(type='image_generation_call',result=encoded)]),dict(response=dict(output=[dict(type='image_generation_call',result=encoded)])),dict(data=[dict(b64_json=encoded)]),dict(output=[dict(type='message',content=[dict(type='output_image',image_url='data:image/png;base64,'+encoded)])]),dict(choices=[dict(message=dict(images=[dict(image_url=dict(url='data:image/png;base64,'+encoded))]))])]
+        for result in samples:self.assertEqual(ai_image_result(result),encoded)
+        with self.assertRaisesRegex(ValueError,'没有修复图片'):ai_image_result(dict(status='completed',output=[dict(type='message',content=[dict(type='output_text',text='Here is advice only')])]))
+        with self.assertRaisesRegex(ValueError,'图像工具'):ai_image_result(dict(output=[dict(type='image_generation_call',status='failed',result=None)]))
+        with self.assertRaisesRegex(ValueError,'未完成'):ai_image_result(dict(status='incomplete'))
+        with self.assertRaisesRegex(ValueError,'图片链接'):ai_image_result(dict(data=[dict(url='https://example.com/untrusted-image.png')]))
+    def test_delete_history_step_removes_effect_and_preserves_later_redo(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);source=root/'source.png';Image.new('RGB',(100,200),'#d8cfb4').save(source)
+            item=dict(id='test',file=source.name,points=FULL,rotation=0,settings=DEFAULTS,trim={},confirmed=True,revision=0)
+            service=RepairService(root,lambda key:json.loads(json.dumps(item)),lambda x:source,threading.RLock(),lambda:None,[item])
+            marks=[dict(id='a',kind='crease',region=[.1,.1,.4,.3]),dict(id='b',kind='bump',region=[.5,.6,.8,.8])]
+            service.post('marks',dict(id='test',signature=crop_signature(item),regions=marks))
+            def repair(image,region,*unused):
+                out=image.copy();x1,y1,x2,y2=region_pixels(region,image.size);ImageDraw.Draw(out).rectangle((x1,y1,x2-1,y2-1),fill=(180,175,160));return out
+            with patch('repairing.local_repair',side_effect=repair):preview=service.post('preview',dict(id='test',regions=marks))
+            for mark in marks:service.post('accept-region',dict(id='test',draft=preview['draft'],mark_id=mark['id']))
+            revision=item['revision']
+            service.post('delete-step',dict(id='test',revision=revision,step=1))
+            self.assertEqual(service.history(item)['current'],1);self.assertEqual(len(service.history(item)['steps']),2)
+            with service.image(item) as image:
+                self.assertEqual(image.getpixel((20,30)),(216,207,180));self.assertEqual(image.getpixel((60,140)),(180,175,160))
+            self.assertEqual(service.marks(item),marks[:1])
+            service.post('undo',dict(id='test'));self.assertEqual({m['id'] for m in service.marks(item)},{'a','b'})
+            service.post('redo',dict(id='test'));self.assertEqual(service.marks(item),marks[:1])
+            self.assertEqual(len(item['repair_deleted_history']),1)
+            with self.assertRaises(ValueError):service.post('delete-step',dict(id='test',revision=item['revision'],step=0))
+            with self.assertRaises(ValueError):service.post('delete-step',dict(id='test',revision=revision,step=1))
+            service.post('undo',dict(id='test'));service.post('delete-step',dict(id='test',revision=item['revision'],step=1))
+            self.assertEqual(service.timeline(item),[]);self.assertEqual({m['id'] for m in service.marks(item)},{'a','b'})
+
+    def test_delete_overlapping_history_is_rejected_without_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);source=root/'source.png';Image.new('RGB',(100,200),'#d8cfb4').save(source)
+            item=dict(id='test',file=source.name,points=FULL,rotation=0,settings=DEFAULTS,trim={},confirmed=True,revision=0)
+            service=RepairService(root,lambda key:json.loads(json.dumps(item)),lambda x:source,threading.RLock(),lambda:None,[item])
+            for n in range(2):
+                preview=service.post('preview',dict(id='test',regions=[dict(id='mark'+str(n),kind='crease',region=[.2,.2,.8,.6])]))
+                service.post('accept',dict(id='test',draft=preview['draft']))
+            before=json.loads(json.dumps(item))
+            with self.assertRaisesRegex(ValueError,'重叠'):service.post('delete-step',dict(id='test',revision=item['revision'],step=1))
+            self.assertEqual(item,before)
+    def test_history_step_pixels_restore_marks_and_redo(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);source=root/'source.png';Image.new('RGB',(100,200),'#d8cfb4').save(source)
+            item=dict(id='test',file=source.name,points=FULL,rotation=0,settings=DEFAULTS,trim={},confirmed=True,revision=0)
+            service=RepairService(root,lambda key:json.loads(json.dumps(item)),lambda x:source,threading.RLock(),lambda:None,[item])
+            marks=[dict(id='a',kind='crease',level='strong',region=[.1,.1,.4,.3]),dict(id='b',kind='bump',level='light',region=[.5,.6,.8,.8])]
+            service.post('marks',dict(id='test',signature=crop_signature(item),regions=marks))
+            def repair(image,region,*unused):
+                out=image.copy();ImageDraw.Draw(out).rectangle(region_pixels(region,image.size),fill=(180,175,160));return out
+            with patch('repairing.local_repair',side_effect=repair):
+                preview=service.post('preview',dict(id='test',regions=marks))
+            service.post('accept-region',dict(id='test',draft=preview['draft'],mark_id='a'))
+            service.post('accept-region',dict(id='test',draft=preview['draft'],mark_id='b'))
+            history=service.history(item);self.assertEqual(history['current'],2);self.assertEqual(len(history['steps']),3)
+            self.assertEqual(history['steps'][1]['regions'][0]['id'],'a');self.assertEqual(history['steps'][2]['methods']['b'],'local')
+            with Image.open(io.BytesIO(service.payload('test',detail=True,step='1',revision=item['revision']))) as image:
+                self.assertEqual(image.getpixel((20,30)),(180,175,160));self.assertEqual(image.getpixel((60,140)),(216,207,180))
+            revision=item['revision'];service.post('restore',dict(id='test',step=0,revision=revision))
+            self.assertEqual(service.marks(item),marks);self.assertEqual(len(service.state(item)['redo']),2)
+            with self.assertRaises(ValueError):service.post('restore',dict(id='test',step=2,revision=revision))
+            with self.assertRaises(ValueError):service.payload('test',step='1',revision=revision)
+            service.post('restore',dict(id='test',step=1,revision=item['revision']))
+            self.assertEqual(service.marks(item),marks[1:]);self.assertEqual(service.history(item)['current'],1)
+            service.post('redo',dict(id='test'));self.assertEqual(service.marks(item),[])
+            pending=service.post('preview',dict(id='test',regions=marks[:1]))
+            with self.assertRaisesRegex(ValueError,'待确认'):service.post('restore',dict(id='test',step=0,revision=item['revision']))
+            service.post('discard',dict(id='test',draft=pending['draft']))
+
+    def test_blemish_gradient_seams_preserve_surroundings_and_firm_ink(self):
+        h,w=240,320;y,x=np.mgrid[:h,:w];rng=np.random.default_rng(17)
+        paper=np.clip((180+.14*x+.035*y+rng.normal(0,2,(h,w)))[:,:,None]+np.array([0,-5,-14]),0,255).astype('uint8')
+        image=Image.fromarray(paper);draw=ImageDraw.Draw(image)
+        draw.ellipse((145,110,165,130),fill=(160,155,140));draw.rectangle((175,104,181,136),fill=(20,20,20))
+        before=np.asarray(image);result=np.asarray(local_repair(image,[.38,.35,.62,.65],1,'blemish'))
+        self.assertTrue(np.array_equal(before[104:137,175:182],result[104:137,175:182]))
+        self.assertTrue(np.array_equal(before[:84],result[:84]))
+        # No new outer-border discontinuity; exact boundary stays original.
+        x1,y1,x2,y2=region_pixels([.38,.35,.62,.65],image.size)
+        self.assertTrue(np.array_equal(result[y1:y2,x1],before[y1:y2,x1]))
+        self.assertTrue(np.array_equal(result[y1,x1:x2],before[y1,x1:x2]))
+        self.assertLess(abs(float(result[115:125,149:160,0].mean())-float(paper[115:125,149:160,0].mean())),8)
+        edge_delta=np.abs(result.astype(float)-before)
+        self.assertLess(float(edge_delta[y1+1,x1:x2].mean()),1)
+
+    def test_small_blemish_does_not_retain_a_round_illumination_halo(self):
+        h,w=140,180;y,x=np.mgrid[:h,:w];rng=np.random.default_rng(19)
+        grain=cv2.GaussianBlur(rng.normal(0,2,(h,w)).astype('float32'),(0,0),.5)
+        clean=190+.12*x+.025*y+grain
+        bump=18*np.exp(-((x-90)/5)**2-((y-68)/2)**2)-15*np.exp(-((x-90)/6)**2-((y-73)/3)**2)
+        image=Image.fromarray(np.clip((clean+bump)[:,:,None]+np.array([0,-3,-7]),0,255).astype('uint8'))
+        out=np.asarray(local_repair(image,[77/w,59/h,103/w,82/h],1,'blemish'))[:,:,0].astype(float)
+        smoothed=cv2.GaussianBlur(out-clean,(0,0),2)
+        self.assertLess(float(np.max(np.abs(smoothed[64:78,83:98]))),2.2,'new paper illumination must not inherit defect halo')
     def test_individual_levels_persist_and_retry_only_selected_region(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);source=root/'source.png';Image.new('RGB',(120,240),'#d8cfb4').save(source)
@@ -435,7 +554,7 @@ class RepairTests(unittest.TestCase):
         image=Image.new('RGB',(120,180),'#d8cfb4');draw=ImageDraw.Draw(image)
         draw.line((45,40,70,130),fill=(20,20,20),width=5)
         draw.rectangle((75,70,90,85),fill=(165,45,40))
-        generated=image.copy();pixels=np.array(generated);pixels[:]=np.clip(pixels.astype(int)+2,0,255);generated=Image.fromarray(pixels)
+        generated=image.copy();pixels=np.array(generated);yy,xx=np.mgrid[:180,:120];change=2+10*np.exp(-((xx-85)/9)**2-((yy-55)/9)**2);pixels[:]=np.clip(pixels.astype(float)+change[:,:,None],0,255);generated=Image.fromarray(pixels)
         buffer=io.BytesIO();generated.save(buffer,'PNG')
         response=io.BytesIO(json.dumps({'output':[{'type':'image_generation_call','result':base64.b64encode(buffer.getvalue()).decode()}]}).encode())
         with patch('urllib.request.urlopen',return_value=response) as call:

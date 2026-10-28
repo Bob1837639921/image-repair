@@ -9,6 +9,7 @@ import re
 import urllib.request
 import urllib.error
 import uuid
+from datetime import datetime
 from urllib.parse import urlparse
 from PIL import Image, ImageDraw
 from imaging import cv2, np, render
@@ -76,7 +77,7 @@ def brush_alpha(mask,radius):
 
 def blemish_repair(image,rect,strength,alpha_mask=None):
     """User-authorized paper replacement using nearby measured texture, not fill."""
-    x1,y1,x2,y2=rect;w,h=x2-x1,y2-y1;gap=max(3,round(min(w,h)*.12))
+    x1,y1,x2,y2=rect;w,h=x2-x1,y2-y1;gap=max(8,round(min(w,h)*.22))
     box=(max(0,x1-gap*2),max(0,y1-gap*2),min(image.width,x2+gap*2),min(image.height,y2+gap*2))
     rgb=np.asarray(image.crop(box)).astype('float32')
     ring=np.ones(rgb.shape[:2],bool);ring[y1-box[1]:y2-box[1],x1-box[0]:x2-box[0]]=False
@@ -100,7 +101,47 @@ def blemish_repair(image,rect,strength,alpha_mask=None):
             if score<best_score:best_score=score;best=donor+paper-med
     if best is None:raise ValueError('周边没有足够干净的纸纹，请缩小选区或使用 AI 修复')
     before=np.asarray(image.crop(rect)).astype('float32')
-    alpha=(feather((w,h)) if alpha_mask is None else alpha_mask)[:,:,None]*min(1,strength*1.6)
+    if alpha_mask is None:
+        # Smooth each edge independently; their product rounds the corners and
+        # avoids a visible rectangular transition at the old 20 px cutoff.
+        border=max(2,min(48,min(w,h)*.18))
+        edge=lambda length:np.clip(np.minimum(np.arange(length),np.arange(length)[::-1])/border,0,1)
+        ex,ey=edge(w),edge(h);ex=ex*ex*(3-2*ex);ey=ey*ey*(3-2*ey)
+        alpha=ey[:,None]*ex[None,:]
+    else:alpha=np.array(alpha_mask,copy=True)
+    # Blemishes can be mid-dark themselves; only firm ink and coloured marks
+    # are excluded here, rather than protecting the defect we must remove.
+    gray=cv2.cvtColor(rgb,cv2.COLOR_RGB2GRAY)
+    closed=cv2.morphologyEx(gray,cv2.MORPH_CLOSE,np.ones((21,21),'uint8'))
+    red=(rgb[:,:,0]-rgb[:,:,1]>20)&(rgb[:,:,0]-rgb[:,:,2]>15)
+    protected=cv2.dilate(((gray<np.maximum(45,closed*.50))|red).astype('uint8'),np.ones((5,5),'uint8'))>0
+    left,top=x1-box[0],y1-box[1]
+    guard=protected[top:top+h,left:left+w]
+    alpha*=1-cv2.GaussianBlur(guard.astype('float32'),(0,0),1.5)
+    alpha[guard]=0
+    # Rebuild illumination from clean OUTSIDE paper only. A Poisson solve using
+    # the defect's boundary can preserve its broad halo as a new round bulge.
+    # A robust local quadratic models the surrounding paper instead; donor
+    # high-frequency grain supplies texture without importing donor lighting.
+    yy,xx=np.mgrid[:rgb.shape[0],:rgb.shape[1]].astype('float64')
+    xx=(xx-(left+(w-1)/2))/max(w,8);yy=(yy-(top+(h-1)/2))/max(h,8)
+    design=np.stack([np.ones_like(xx),xx,yy,xx*xx,xx*yy,yy*yy],axis=-1)
+    usable=ring&~protected
+    if usable.sum()<24:raise ValueError('选区周围可参考的干净纸面不足，请缩小范围或改用 AI')
+    X=design[usable];Y=rgb[usable].astype('float64')
+    if len(X)>12000:
+        sample=np.linspace(0,len(X)-1,12000,dtype=int);X=X[sample];Y=Y[sample]
+    weights=np.ones(len(X))
+    for _ in range(5):
+        root=np.sqrt(weights)[:,None]
+        coefficients=np.linalg.lstsq(X*root,Y*root,rcond=None)[0]
+        residual=np.linalg.norm(Y-X@coefficients,axis=1)
+        scale=max(1.5,float(np.median(residual))*1.4826)
+        weights=np.minimum(1,(2.5*scale)/np.maximum(residual,1e-6))**2
+    illumination=(design[top:top+h,left:left+w]@coefficients).astype('float32')
+    low=cv2.GaussianBlur(best.astype('float32'),(0,0),max(2,min(16,min(w,h)*.16)))
+    best=illumination+(best-low)
+    alpha=alpha[:,:,None]*min(1,strength*1.6)
     patch=np.rint(np.clip(before*(1-alpha)+np.clip(best,0,255)*alpha,0,255)).astype('uint8')
     out=image.copy();out.paste(Image.fromarray(patch),(x1,y1));return out
 
@@ -489,7 +530,114 @@ def image_data_url(image):
     return 'data:image/png;base64,'+base64.b64encode(buffer.getvalue()).decode()
 
 
-def ai_repair(image,region,key,kind='crease',base_url='https://api.openai.com/v1',model='gpt-image-1.5',annotation=None):
+def ai_image_result(result):
+    """Accept embedded image payloads, including common proxy envelopes.
+
+    Never fetch model-supplied URLs or mistake a successful text reply for an
+    image. Diagnostics deliberately contain structure only, not prompts/keys.
+    """
+    root=result.get('response',result) if isinstance(result,dict) else {}
+    if not isinstance(root,dict):root={}
+    def inline(value):
+        if isinstance(value,dict):value=value.get('url')
+        if isinstance(value,str) and value.startswith('data:image/') and ';base64,' in value:return value.split(';base64,',1)[1]
+        return None
+    for entry in root.get('output',[]) or []:
+        if not isinstance(entry,dict):continue
+        if entry.get('type')=='image_generation_call' and isinstance(entry.get('result'),str) and entry['result']:return entry['result']
+        for part in entry.get('content',[]) or []:
+            if not isinstance(part,dict):continue
+            if part.get('type') in ('output_image','image','image_url'):
+                raw=part.get('b64_json') or inline(part.get('image_url')) or inline(part.get('url'))
+                if raw:return raw
+    for entry in root.get('data',[]) or []:
+        if isinstance(entry,dict):
+            raw=entry.get('b64_json') or inline(entry.get('url'))
+            if raw:return raw
+    for choice in root.get('choices',[]) or []:
+        message=choice.get('message',{}) if isinstance(choice,dict) else {}
+        for entry in message.get('images',[]) or []:
+            if isinstance(entry,dict):
+                raw=inline(entry.get('image_url')) or inline(entry.get('url'))
+                if raw:return raw
+    types=[entry.get('type','unknown') for entry in root.get('output',[]) or [] if isinstance(entry,dict)]
+    if root.get('error'):raise ValueError('AI 服务返回错误内容，请检查代理的响应详情；本次未得到图片')
+    if root.get('status')=='incomplete':raise ValueError('AI 响应未完成，未返回完整修复图像；请查看代理任务状态')
+    if 'image_generation_call' in types:raise ValueError('AI 已调用图像工具，但未返回完整图片数据；请检查代理是否完整转发了图像结果')
+    if any(entry.get('url') for entry in root.get('data',[]) or [] if isinstance(entry,dict)):raise ValueError('AI 只返回图片链接，当前需要内嵌图片数据；请将图像接口配置为 b64_json 返回')
+    raise ValueError('AI 请求已返回，但没有修复图片。当前通道可能只返回了文字，或未转发图像工具结果；请检查代理的图像生成能力，不建议直接重复重试')
+
+
+def calibrate_ai_paper(reference,generated,mask):
+    """Anchor generated paper colour/lighting to unedited reference context.
+
+    The AI mask is not assumed to be obeyed perfectly by a proxy. Measure its
+    unwanted change on the opaque paper collar, excluding ink, and remove a
+    robust affine colour field from the entire returned canvas.
+    """
+    a=np.asarray(reference).astype('float32');b=np.asarray(generated).astype('float32')
+    opaque=np.asarray(mask)[:,:,3]>0
+    paper=~protected_ink(reference)
+    usable=opaque&paper
+    # Restrict the measurement to real nearby context, avoiding padded canvas
+    # and remote paper that may have a different photographic exposure.
+    editable=(~opaque).astype('uint8')
+    if not editable.any():return b
+    distance=cv2.distanceTransform((1-editable).astype('uint8'),cv2.DIST_L2,3)
+    usable&=(distance>=5)&(distance<=80)
+    if usable.sum()<48:return b
+    yy,xx=np.mgrid[:a.shape[0],:a.shape[1]].astype('float32')
+    design=np.stack([np.ones_like(xx),(xx-a.shape[1]/2)/a.shape[1],(yy-a.shape[0]/2)/a.shape[0]],axis=-1)
+    X=design[usable];Y=(b-a)[usable]
+    if len(X)>10000:
+        sample=np.linspace(0,len(X)-1,10000,dtype=int);X=X[sample];Y=Y[sample]
+    weight=np.ones(len(X))
+    for _ in range(5):
+        root=np.sqrt(weight)[:,None];coefficients=np.linalg.lstsq(X*root,Y*root,rcond=None)[0]
+        residual=np.linalg.norm(Y-X@coefficients,axis=1);scale=max(1.,float(np.median(residual))*1.4826)
+        weight=np.minimum(1,2.5*scale/np.maximum(residual,1e-6))**2
+    return np.clip(b-design@coefficients,0,255).astype('float32')
+
+
+def blend_ai_correction(before,after,allowed,kind=None):
+    """Keep exact protected pixels and use a scale-aware, zero-slope edge.
+
+    Fixed 20 px ramps expose a rectangle on large selections. Smoothstep has
+    no abrupt change of slope where blending starts or becomes fully opaque.
+    """
+    h,w=allowed.shape;yy,xx=np.mgrid[:h,:w]
+    width=max(3,min(160,min(w,h)*.24))
+    dx=np.minimum(xx,w-1-xx)/width;dy=np.minimum(yy,h-1-yy)/width
+    smooth=lambda t:(lambda a:a*a*(3-2*a))(np.clip(t,0,1))
+    edge=smooth(dx)*smooth(dy)
+    distance=cv2.distanceTransform(np.pad(allowed,1).astype('uint8'),cv2.DIST_L2,3)[1:-1,1:-1]
+    guard=smooth(distance/4)*allowed
+    correction=cv2.GaussianBlur((after-before).astype('float32'),(0,0),2)
+    if kind in ('crease','bump'):
+        # Anchor the patch boundary itself too: some image services preserve
+        # opaque context exactly but still tint the whole editable rectangle.
+        band=max(3,min(18,round(min(w,h)*.07)))
+        border=(xx<band)|(xx>=w-band)|(yy<band)|(yy>=h-band)
+        clear=cv2.erode(allowed.astype('uint8'),np.ones((7,7),'uint8')).astype(bool)
+        use=border&clear
+        if use.sum()>=48:
+            design=np.stack([np.ones_like(xx),(xx-w/2)/w,(yy-h/2)/h],axis=-1).astype('float32')
+            X=design[use];Y=correction[use];weight=np.ones(len(X))
+            for _ in range(4):
+                root=np.sqrt(weight)[:,None];coefficients=np.linalg.lstsq(X*root,Y*root,rcond=None)[0]
+                residual=np.linalg.norm(Y-X@coefficients,axis=1);scale=max(1,float(np.median(residual))*1.4826)
+                weight=np.minimum(1,2.5*scale/np.maximum(residual,1e-6))**2
+            correction-=design@coefficients
+        # Folds/bulges are shading defects. Retain the original chromaticity
+        # rather than blending the model's independently recoloured RGB patch.
+        old_gray=cv2.cvtColor(before.astype('float32'),cv2.COLOR_RGB2GRAY)
+        new_gray=cv2.cvtColor((before+correction).astype('float32'),cv2.COLOR_RGB2GRAY)
+        gain=np.clip((new_gray-old_gray)/np.maximum(old_gray,30),-.25,.25)
+        correction=before*gain[:,:,None]
+    return np.rint(np.clip(before+correction*(edge*guard)[:,:,None],0,255)).astype('uint8')
+
+
+def ai_repair(image,region,key,kind='crease',base_url='https://api.openai.com/v1',model='gpt-6.1-sol',annotation=None):
     if not key:raise ValueError('请先在 AI 连接中配置 OpenAI API Key')
     x1,y1,x2,y2=region_pixels(region,image.size)
     pad=max(32,min(200,max(x2-x1,y2-y1)//4))
@@ -521,29 +669,25 @@ def ai_repair(image,region,key,kind='crease',base_url='https://api.openai.com/v1
     request=urllib.request.Request(base_url+'/images/edits',data=b''.join(chunks),headers={'Authorization':'Bearer '+key,'Content-Type':'multipart/form-data; boundary='+boundary})
     responses=not model.startswith(('gpt-image','grok-imagine','image-'))
     if responses:
-        body=dict(model=model,input=[dict(role='user',content=[dict(type='input_text',text=repair_prompt(kind,annotation)+' Keep exact canvas framing and dimensions. No padding or borders. Only edit transparent mask pixels; opaque pixels and ink are protected.'),dict(type='input_image',image_url=image_data_url(canvas))])],tools=[dict(type='image_generation',size=output_size,quality='high',input_image_mask=dict(image_url=image_data_url(mask)))],tool_choice=dict(type='image_generation'),store=False)
+        body=dict(model=model,input=[dict(role='user',content=[dict(type='input_text',text=repair_prompt(kind,annotation)+' Return the edited image by calling the image_generation tool. Text-only advice does not complete this task. Keep exact canvas framing and dimensions. No padding or borders. Only edit transparent mask pixels; opaque pixels and ink are protected.'),dict(type='input_image',image_url=image_data_url(canvas))])],tools=[dict(type='image_generation',action='edit',size=output_size,quality='high',input_image_mask=dict(image_url=image_data_url(mask)))],tool_choice=dict(type='image_generation'),store=False)
         request=urllib.request.Request(base_url+'/responses',data=json.dumps(body).encode(),headers={'Authorization':'Bearer '+key,'Content-Type':'application/json'})
     try:
         with urllib.request.urlopen(request,timeout=300) as response:result=json.load(response)
     except urllib.error.HTTPError as error:
-        note='代理未提供图像编辑接口，请检查模型及 /images/edits 支持情况' if error.code in (404,405) else '请检查图像编辑模型、Key、权限及额度'
+        note=('代理未提供 /responses 图像工具接口' if responses else '代理未提供 /images/edits 图像编辑接口') if error.code in (404,405) else '请检查图像编辑模型、Key、权限及额度'
         raise ValueError(f'AI 服务请求失败（HTTP {error.code}），{note}') from None
     except (OSError,TimeoutError):raise ValueError('AI 服务连接超时或网络不可用，请重试') from None
-    raw=next((entry.get('result') for entry in result.get('output',[]) if entry.get('type')=='image_generation_call' and entry.get('result')),None) if responses else result.get('data',[{}])[0].get('b64_json')
-    if not raw:raise ValueError('AI 未返回图像，请重试')
+    raw=ai_image_result(result)
     with Image.open(io.BytesIO(base64.b64decode(raw))) as generated:
         if abs((generated.width/generated.height)/(canvas.width/canvas.height)-1)>.01:raise ValueError('AI 返回宽高比例改变，已拒绝拉伸结果，避免字体变形')
         generated=generated.convert('RGB').resize(canvas_size,Image.Resampling.LANCZOS)
+    generated=Image.fromarray(np.rint(calibrate_ai_paper(canvas,generated,mask)).astype('uint8'))
     patch=generated.crop((x1-box[0]+offset[0],y1-box[1]+offset[1],x2-box[0]+offset[0],y2-box[1]+offset[1]))
     verify_ai_patch(image.crop((x1,y1,x2,y2)),patch)
     before=np.asarray(image.crop((x1,y1,x2,y2))).astype(float);after=np.asarray(patch).astype(float)
     allowed=(np.asarray(mask)[:,:,3]==0)[y1-box[1]+offset[1]:y2-box[1]+offset[1],x1-box[0]+offset[0]:x2-box[0]+offset[0]]
     # Smooth only the AI correction field, retaining the original paper grain.
-    correction=cv2.GaussianBlur((after-before).astype('float32'),(0,0),2)
-    after=np.clip(before+correction,0,255)
-    distance=cv2.distanceTransform(allowed.astype('uint8'),cv2.DIST_L2,3)
-    alpha=(feather(patch.size)*np.minimum(distance/4,1))[:,:,None]
-    out=image.copy();out.paste(Image.fromarray(np.rint(before*(1-alpha)+after*alpha).astype('uint8')),(x1,y1));return out
+    out=image.copy();out.paste(Image.fromarray(blend_ai_correction(before,after,allowed,kind)),(x1,y1));return out
 
 
 class RepairService:
@@ -555,7 +699,7 @@ class RepairService:
         try:
             if self.draft_path.exists():self.drafts=json.loads(self.draft_path.read_text('utf-8'))
         except (ValueError,OSError):self.drafts={}
-        self.base_url='http://127.0.0.1:8317/v1';self.model='gpt-image-1.5'
+        self.base_url='http://127.0.0.1:8317/v1';self.model='gpt-6.1-sol'
         self.config_path=data/'ai-connection.json';self.config_warning='';self.persisted=False
         try:
             saved=load_connection(self.config_path)
@@ -576,7 +720,7 @@ class RepairService:
         with self.lock:
             for token,draft in reversed(list(self.drafts.items())):
                 if draft.get('origin')=='single' and self.valid_draft(item,token):
-                    return dict(draft=token,regions=draft['regions'],method=draft['method'],strength=draft.get('strength',.65))
+                    return dict(draft=token,regions=draft['regions'],method=draft['method'],methods={m['id']:draft.get('patches',{}).get(m['id'],{}).get('method',draft['method']) for m in draft['regions']},strength=draft.get('strength',.65))
         return None
 
     def state(self,item):
@@ -586,6 +730,17 @@ class RepairService:
     def marks(self,item):
         marks=item.get('repair_marks',{})
         return marks.get('regions',[]) if marks.get('signature')==crop_signature(item) else []
+
+    def timeline(self,item):
+        state=self.state(item)
+        return list(state.get('layers',[]))+list(reversed(state.get('redo',[])))
+
+    def history(self,item):
+        state=self.state(item);steps=[dict(step=0,label='原裁剪图',regions=[],time=None,methods={})]
+        for index,name in enumerate(self.timeline(item),1):
+            detail=state.get('details',{}).get(name,{})
+            steps.append(dict(step=index,label=f'第 {index} 步',regions=detail.get('regions',[]),time=detail.get('time'),methods=detail.get('methods',{}),strength=detail.get('strength',.65)))
+        return dict(id=item['id'],revision=item['revision'],current=len(state.get('layers',[])),steps=steps)
 
     def image(self,item,before=False):
         state=self.state(item)
@@ -615,10 +770,17 @@ class RepairService:
                 with Image.open(self.folder/draft['file']) as result:image.paste(result.crop(rect),(rect[0],rect[1]))
         return image
 
-    def payload(self,key,detail=False,before=False,draft=None):
+    def payload(self,key,detail=False,before=False,draft=None,step=None,revision=None):
         item=self.find(key)
         if not item.get('confirmed'):raise ValueError('请先确认裁剪，再进入修复')
-        if draft:
+        if step is not None:
+            if revision is not None and str(item['revision'])!=str(revision):raise ValueError('修复历史已变化，请重新打开历史')
+            timeline=self.timeline(item)
+            if not str(step).isdigit() or not 0<=int(step)<=len(timeline):raise ValueError('修复步骤不存在')
+            if int(step)==0:image=self.image(item,before=True)
+            else:
+                with Image.open(self.folder/timeline[int(step)-1]) as im:image=im.convert('RGB')
+        elif draft:
             candidate=self.drafts.get(draft)
             if not self.valid_draft(item,draft):raise ValueError('修复预览已失效')
             with Image.open(self.folder/candidate['file']) as im:image=im.convert('RGB')
@@ -717,7 +879,7 @@ class RepairService:
                     snapshot.update(file=filename,regions=regions);self.drafts[token]=snapshot
                 else:self.drafts.pop(token)
                 self.save_drafts()
-                return dict(item=json.loads(json.dumps(target)),draft=token if regions else None,regions=regions)
+                return dict(item=json.loads(json.dumps(target)),draft=token if regions else None,regions=regions,methods={m['id']:snapshot.get('patches',{}).get(m['id'],{}).get('method',snapshot['method']) for m in regions})
         if action=='preview':
             method=body.get('method','local');kind=body.get('kind','crease')
             if method not in ('local','ai') or kind not in ('crease','bump','blemish'):raise ValueError('修复方式不正确')
@@ -735,7 +897,7 @@ class RepairService:
                     delta=np.asarray(result.crop(rect)).astype('int16')-np.asarray(repaired.crop(rect)).astype('int16')
                     patch_file=token+'_'+str(index)+'.npz'
                     np.savez_compressed(self.folder/patch_file,delta=delta)
-                    patches[mark['id']]=dict(file=patch_file,rect=list(rect))
+                    patches[mark['id']]=dict(file=patch_file,rect=list(rect),method=method)
                     repaired.close();repaired=result
                     if repaired.size!=image.size:raise ValueError('修复结果像素尺寸改变，已拒绝保存')
                 name=token+'.png';repaired.save(self.folder/name,'PNG');size=list(repaired.size)
@@ -782,12 +944,64 @@ class RepairService:
                 marks_after=[mark for mark in marks_before if mark not in selected]
                 target['repair_marks']=dict(signature=signature,regions=marks_after)
                 latest['layers'].append(name);latest['redo']=[];latest['completed']=False
-                latest.setdefault('details',{})[name]=dict(regions=selected,marks_before=marks_before,marks_after=marks_after)
+                methods={mark['id']:draft.get('patches',{}).get(mark['id'],{}).get('method',draft.get('method','local')) for mark in selected}
+                latest.setdefault('details',{})[name]=dict(regions=selected,marks_before=marks_before,marks_after=marks_after,methods=methods,strength=draft.get('strength',.65),time=datetime.now().astimezone().isoformat(timespec='seconds'))
                 remaining=[mark for mark in draft['regions'] if mark not in selected]
                 if remaining:
                     draft.update(regions=remaining,marks=marks_after,layers=list(latest['layers']))
                 else:self.drafts.pop(body['draft'])
                 self.save_drafts()
+            elif action=='delete-step':
+                if any(self.valid_draft(target,token) for token in self.drafts):raise ValueError('请先采用或放弃待确认预览，再删除历史步骤')
+                if body.get('revision')!=target['revision']:raise ValueError('修复历史已变化，请重新打开历史')
+                step=body.get('step');timeline=self.timeline(target)
+                if type(step) is not int or not 1<=step<=len(timeline):raise ValueError('原裁剪图不可删除，请选择修复步骤')
+                removed=timeline[step-1];details=latest.get('details',{});detail=details.get(removed,{})
+                regions=detail.get('regions',[])
+                if not regions:raise ValueError('该旧步骤缺少区域记录，无法安全单独删除')
+                for later in timeline[step:]:
+                    if not details.get(later,{}).get('regions'):raise ValueError('后续旧步骤缺少区域记录，无法安全保留，请先删除后面的步骤')
+                    for first in regions:
+                        for second in details.get(later,{}).get('regions',[]):
+                            a,b=first['region'],second['region']
+                            if min(a[2],b[2])>max(a[0],b[0]) and min(a[3],b[3])>max(a[1],b[1]):raise ValueError('后续步骤与此处重叠，无法单独移除；请从最后一个重叠步骤开始删除')
+                with self.image(target,before=True) as base:
+                    if step>1:
+                        with Image.open(self.folder/timeline[step-2]) as im:previous=np.asarray(im.convert('RGB')).astype('int16')
+                    else:previous=np.asarray(base).astype('int16')
+                    with Image.open(self.folder/removed) as im:delta=np.asarray(im.convert('RGB')).astype('int16')-previous
+                rebuilt=timeline[:step-1];new_details=json.loads(json.dumps(details));created=[]
+                def restore_marks(marks):
+                    values=json.loads(json.dumps(marks));ids={m['id'] for m in values}
+                    values.extend(json.loads(json.dumps(m)) for m in regions if m['id'] not in ids)
+                    return values
+                try:
+                    for later in timeline[step:]:
+                        with Image.open(self.folder/later) as im:pixels=np.asarray(im.convert('RGB')).astype('int16')
+                        name=uuid.uuid4().hex+'.png';Image.fromarray(np.clip(pixels-delta,0,255).astype('uint8')).save(self.folder/name,'PNG');created.append(name)
+                        metadata=json.loads(json.dumps(details.get(later,{})))
+                        for field in ('marks_before','marks_after'):
+                            if field in metadata:metadata[field]=restore_marks(metadata[field])
+                        new_details[name]=metadata;rebuilt.append(name)
+                except Exception:
+                    for name in created:(self.folder/name).unlink(missing_ok=True)
+                    raise
+                current_step=len(latest['layers']);new_current=current_step-int(step<=current_step)
+                # Retain internal snapshots as a backup; no original images or
+                # exported files are physically removed by history deletion.
+                target.setdefault('repair_deleted_history',[]).append(dict(state=json.loads(json.dumps(latest)),deleted_step=step,time=datetime.now().astimezone().isoformat(timespec='seconds')))
+                latest.update(layers=rebuilt[:new_current],redo=list(reversed(rebuilt[new_current:])),details=new_details,completed=False)
+                if step<=current_step:target['repair_marks']=dict(signature=signature,regions=restore_marks(self.marks(target)))
+            elif action=='restore':
+                if any(self.valid_draft(target,token) for token in self.drafts):raise ValueError('请先采用或放弃待确认预览，再恢复历史步骤')
+                if body.get('revision')!=target['revision']:raise ValueError('修复历史已变化，请重新打开历史')
+                step=body.get('step');timeline=self.timeline(target)
+                if type(step) is not int or not 0<=step<=len(timeline):raise ValueError('修复步骤不存在')
+                marks=None
+                if step:marks=latest.get('details',{}).get(timeline[step-1],{}).get('marks_after')
+                elif timeline:marks=latest.get('details',{}).get(timeline[0],{}).get('marks_before')
+                latest['layers']=timeline[:step];latest['redo']=list(reversed(timeline[step:]));latest['completed']=False
+                if marks is not None:target['repair_marks']=dict(signature=signature,regions=json.loads(json.dumps(marks)))
             elif action=='undo':
                 if latest['layers']:
                     layer=latest['layers'].pop();latest.setdefault('redo',[]).append(layer)

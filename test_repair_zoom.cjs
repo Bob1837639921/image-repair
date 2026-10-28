@@ -5,10 +5,10 @@ const wrap={style:{},getBoundingClientRect(){const width=parseFloat(this.style.w
 nodes.set('repairViewport',view);nodes.set('repairWrap',wrap);nodes.set('repairImage',{naturalWidth:500});nodes.set('repairEmpty',{hidden:true});
 nodes.set('repairZoom',{value:'fit',append(option){nodes.set(option.id,option)}});
 function $(id){if(!nodes.has(id))nodes.set(id,{style:{}});return nodes.get(id)}
-const context=vm.createContext({$,current:{confirmed:true},repairSize:[500,1000],repairSelection:[.4,.2,.5,.3],document:{createElement:()=>({})}});
+const context=vm.createContext({$,getComputedStyle:()=>({paddingLeft:'16px',paddingRight:'16px',paddingTop:'16px',paddingBottom:'16px'}),current:{confirmed:true},repairSize:[500,1000],repairSelection:[.4,.2,.5,.3],document:{createElement:()=>({})}});
 vm.runInContext(source.slice(source.indexOf('function repairCurrentScale'),source.indexOf('async function showRepairImage')),context);
 context.repairSelectionKind='bump';
-vm.runInContext('fitRepair()',context);assert.equal(wrap.style.height,'574px');
+vm.runInContext('fitRepair()',context);assert.equal(wrap.style.height,'566px');
 vm.runInContext('zoomRepair(4,[350,300])',context);assert.equal(wrap.style.width,'2000px');assert.equal(wrap.style.height,'4000px');assert.equal($('repairZoomPercent').textContent,'400%');
 assert.equal($('repairSelection').style.left,'40%');assert.ok(Math.abs(parseFloat($('repairSelection').style.width)-10)<1e-8);
 assert.equal($('repairSelection').className,'bump');
@@ -18,5 +18,5 @@ const before=wrap.getBoundingClientRect(),pixel=[(350-before.left)/before.width,
 vm.runInContext('zoomRepair(8,[350,300])',context);const after=wrap.getBoundingClientRect();
 assert.ok(Math.abs(after.left+pixel[0]*after.width-350)<1e-7);assert.ok(Math.abs(after.top+pixel[1]*after.height-300)<1e-7);
 vm.runInContext('zoomRepair(100)',context);assert.equal(wrap.style.width,'4000px');
-vm.runInContext('zoomRepair("fit")',context);assert.equal(wrap.style.height,'574px');
+vm.runInContext('zoomRepair("fit")',context);assert.equal(wrap.style.height,'566px');
 console.log('PASS: repair native-pixel zoom, 800% limit, pointer anchor and selection coordinates');

@@ -178,6 +178,26 @@ body.dragging main{outline:3px dashed var(--accent);outline-offset:-6px}
 #repairSettings .repair-action-row{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:4px}
 #repairSettings .repair-action-row .wide{width:100%;margin:0;padding:8px 5px;font-size:12px;min-width:0}
 #repairSettings .repair-export-status{margin-top:auto}
+#repairHistoryDialog{width:min(1060px,calc(100vw - 36px));height:min(760px,calc(100dvh - 36px));padding:0;border:1px solid var(--line-strong);border-radius:13px;background:var(--paper);color:var(--ink);overflow:hidden}
+#repairHistoryDialog[open]{display:flex;flex-direction:column}
+#repairHistoryDialog::backdrop{background:#221d1860;backdrop-filter:blur(3px)}
+.repair-history-layout{display:grid;grid-template-columns:180px minmax(0,1fr);min-height:0;flex:1}
+#repairHistoryList{overflow:auto;padding:12px;border-right:1px solid var(--line);background:var(--paper-subtle)}
+#repairHistoryList button{display:block;width:100%;text-align:left;padding:10px;margin-bottom:6px;background:transparent;border-color:transparent}
+#repairHistoryList button.active{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
+#repairHistoryList strong{display:block;font-size:12px}#repairHistoryList small{display:block;margin-top:5px;font-size:10px;color:var(--muted)}
+.repair-history-content{display:flex;flex-direction:column;padding:14px;min-width:0;min-height:0}
+#repairHistorySummary strong{font-size:13px}#repairHistorySummary p{font-size:11px;color:var(--ink-soft);line-height:1.7;margin:7px 0 12px;max-height:72px;overflow:auto}
+.repair-history-pair{display:grid;grid-template-columns:1fr 1fr;gap:10px;min-height:0;flex:1}
+.repair-history-pair>div{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:8px;min-width:0;min-height:0;overflow:hidden}
+.repair-history-pair strong{font-size:11px;padding:8px;background:var(--paper-subtle)}
+.repair-history-pair>div>div{position:relative;display:flex;align-items:center;justify-content:center;min-height:0;flex:1;padding:10px;background:var(--canvas);overflow:hidden}
+.repair-history-pair canvas,.repair-history-pair img{max-width:100%;max-height:100%;object-fit:contain;display:block;width:auto;height:auto}
+#repairHistoryStatus{font-size:11px;color:var(--muted);line-height:1.7;margin:10px 0 0;min-height:19px}
+.repair-history-footer{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 16px;border-top:1px solid var(--line)}
+.repair-history-footer span{font-size:11px;color:var(--muted)}.repair-history-footer button{font-size:12px}
+.repair-history-footer span{margin-right:auto}.repair-history-delete{color:#a6382b;border-color:#dec3bd;background:#fff6f3;white-space:nowrap}
+@media(max-width:650px){.repair-history-layout{grid-template-columns:120px minmax(0,1fr)}.repair-history-content{padding:8px}.repair-history-pair{gap:5px}.repair-history-footer span{max-width:50%}}
 #aiConfigDialog{width:min(460px,calc(100vw - 32px));max-height:85dvh;padding:0;border:1px solid var(--line-strong);border-radius:14px;background:var(--paper);color:var(--ink);box-shadow:0 20px 70px #1f191238;overflow:auto}
 #aiConfigDialog::backdrop{background:#221d1855;backdrop-filter:blur(3px)}
 .ai-config-head{position:sticky;top:0;z-index:1;display:flex;align-items:center;justify-content:space-between;padding:15px 20px;border-bottom:1px solid var(--line);background:var(--paper)}
@@ -188,6 +208,36 @@ body.dragging main{outline:3px dashed var(--accent);outline-offset:-6px}
 #aiConfigBody .wide{font-size:12px}
 #aiConfigBody .advanced-controls{margin-top:16px}
 #openAiConfig{background:var(--paper-subtle);border-color:var(--line-strong)}
+#openAiConfig{display:grid;place-items:center;width:34px;height:34px;min-width:34px;padding:0;border-radius:8px}
+#openAiConfig svg{display:block}
+#aiConfigDialog.app-settings{width:min(740px,calc(100vw - 32px))}
+.settings-layout{display:grid;grid-template-columns:136px minmax(0,1fr);min-height:390px}
+.settings-tabs{display:flex;flex-direction:column;gap:6px;padding:18px 10px;border-right:1px solid var(--line);background:var(--paper-subtle)}
+.settings-tabs button{text-align:left;padding:10px 14px;border:0;background:transparent;font-size:12px;border-radius:7px}
+.settings-tabs button.active{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.settings-content{min-width:0;padding:24px}
+.settings-content h3{font-family:var(--serif);font-size:18px;margin:0 0 10px;font-weight:600}
+.settings-eyebrow{font-size:9px;color:var(--muted);letter-spacing:1.4px;margin-bottom:8px}
+.settings-description{font-size:12px;line-height:1.8;color:var(--ink-soft);margin:0 0 18px}
+.storage-current{padding:13px 15px;margin:18px 0 22px;background:var(--paper-subtle);border:1px solid var(--line);border-radius:8px}
+.storage-current span{display:block;font-size:10px;color:var(--muted);margin-bottom:6px}
+#storageCurrentPath{display:block;font-size:12px;line-height:1.6;overflow-wrap:anywhere;font-family:var(--sans,inherit)}
+.storage-label{font-size:12px;margin:0 0 7px;display:block}
+.storage-path-field{display:flex;gap:7px}
+.storage-path-field input{min-width:0;flex:1;width:100%;padding:9px 10px;font-size:12px}
+.storage-path-field button{white-space:nowrap;font-size:11px;padding:8px 10px}
+.storage-hint{font-size:11px;margin-top:10px}
+.storage-actions{display:flex;margin-top:22px}
+.storage-actions button{font-size:12px;padding:9px 15px}
+.settings-status{font-size:11px;line-height:1.8;color:var(--muted);overflow-wrap:anywhere;margin:12px 0 0}
+.settings-status.error{color:#a6382b}
+#storageProgress{margin-top:16px}#storageProgressMeter{width:100%;height:6px;accent-color:var(--accent)}
+.settings-content #aiConfigBody{padding:0}.settings-content #aiConfigBody h3{margin-bottom:12px}
+.settings-ai-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:18px}
+.settings-ai-actions button{width:100%;margin:0;padding:10px 8px;font-size:12px;border-radius:7px}
+.settings-ai-actions #repairTest{background:var(--accent-soft);border-color:var(--line-strong);color:var(--accent)}
+.settings-ai-actions #repairTest:hover{border-color:var(--accent)}
+@media(max-width:600px){.settings-layout{grid-template-columns:1fr}.settings-tabs{flex-direction:row;padding:8px 12px;border-right:0;border-bottom:1px solid var(--line)}.settings-tabs button{flex:1;text-align:center}.settings-content{padding:18px}.storage-path-field{flex-wrap:wrap}}
 .repair-canvas-actions{position:absolute;right:14px;bottom:16px;z-index:3;display:flex;flex-wrap:wrap;gap:4px;max-width:calc(100% - 28px);padding:5px;border:1px solid var(--line-strong);border-radius:10px;background:#fbf8f2f2;box-shadow:0 4px 16px #221d181c}
 .repair-canvas-actions button{font-size:11px;padding:5px 8px;width:auto;margin:0}
 .repair-zoom-bar .repair-tools{display:flex;gap:3px;margin:0;padding-left:5px;border-left:1px solid var(--line)}
@@ -266,7 +316,7 @@ label.repair-snap input[type=checkbox]{width:14px;height:14px;margin:0;accent-co
 .repair-brush.blemish polyline{stroke:#9162b4}
 .repair-brush.active polyline{opacity:.64;filter:drop-shadow(0 0 2px #ffffffd9)}
 .repair-brush.live polyline{opacity:.56}
-#repairBrushCursor{position:absolute;pointer-events:none;z-index:5;border-radius:50%;transform:translate(-50%,-50%);border:1.5px solid #d58b23;background:#d58b2318;box-shadow:0 0 0 1px #ffffffcc}
+#repairBrushCursor{position:fixed;pointer-events:none;z-index:5;border-radius:50%;transform:translate(-50%,-50%);border:1.5px solid #d58b23;background:#d58b2318;box-shadow:0 0 0 1px #ffffffcc}
 #repairBrushCursor.bump{border-color:#338fc9;background:#338fc918}
 #repairBrushCursor.blemish{border-color:#9162b4;background:#9162b418}
 #repairBrushCursor.eraser{border-color:#3a322b;border-style:dashed;background:#ffffff40}
@@ -303,14 +353,28 @@ label.repair-snap input[type=checkbox]{width:14px;height:14px;margin:0;accent-co
 .repair-compare-group{display:flex;flex-direction:column;min-width:0;min-height:220px;flex:1;border:1px solid var(--line-strong);border-radius:8px;overflow:hidden;background:var(--paper)}
 #repairCompare.multiple .repair-compare-group{flex:0 0 clamp(230px,38vh,380px)}
 .repair-compare-group.active{border-color:var(--accent)}
+.repair-compare-group{position:relative}
+.repair-region-loading{position:relative}
+.repair-region-loading-overlay{position:absolute;inset:39px 0 0;z-index:8;display:flex;align-items:center;justify-content:center;background:#f7f3eb65;backdrop-filter:blur(1px);cursor:progress;animation:repair-loading-enter .16s ease-out}
+.repair-region-loading-panel{display:flex;flex-direction:column;align-items:center;gap:10px;max-width:80%;padding:20px 24px;border:1px solid var(--line-strong);border-radius:12px;background:#fcf9f2f5;box-shadow:0 6px 28px #221d1820;text-align:center}
+.repair-region-loading-panel .repair-spinner{margin:0;width:23px;height:23px}
+.repair-region-loading-panel strong{font-size:12px;color:var(--ink)}
+.repair-region-loading-panel>span:last-child{font-size:11px;color:var(--muted);line-height:1.7}
+.repair-region-actions button.is-loading:disabled{opacity:1;color:var(--accent);background:var(--accent-soft);border-color:var(--accent);cursor:progress}
+@keyframes repair-loading-enter{from{opacity:0}to{opacity:1}}
+@media(prefers-reduced-motion:reduce){.repair-region-loading-overlay{animation:none}}
 #repairCompare.full-work{padding:0}
 .repair-compare-group.full-work{border:0;border-radius:0;min-height:0;overflow:hidden}
 .repair-compare-group.full-work .repair-compare-pair{padding:0}
 .repair-compare-title{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;padding:6px 10px;background:#f6f1e7;border-left:3px solid #d58b23}
-.repair-compare-title{flex-wrap:wrap}
-.repair-region-actions{display:flex;gap:5px;flex-wrap:wrap}
-.repair-level-row{display:flex;align-items:center;gap:10px;flex-basis:100%;font-size:11px;font-weight:400}
+.repair-compare-title{flex-wrap:nowrap;justify-content:flex-start;gap:8px;padding:5px 8px;font-size:11px;white-space:nowrap;overflow-x:auto;scrollbar-width:thin}
+.repair-region-actions{display:flex;gap:4px;flex-wrap:nowrap;flex-shrink:0;order:2;margin-left:auto}
+.repair-level-row{display:flex;align-items:center;gap:6px;flex-shrink:0;order:1;font-size:10px;font-weight:400}
+.repair-compare-title .repair-level-control{padding:2px;gap:1px;border-radius:6px}
+.repair-compare-title .repair-level-control button{padding:3px 6px;font-size:10px}
+.repair-compare-title .repair-accept-region{padding:4px 6px;font-size:10px}
 .repair-level-note{color:var(--ink-soft)}
+.repair-method-badge{font-size:9px;font-weight:500;padding:2px 4px;border-radius:4px;background:var(--accent-soft);color:var(--accent);flex-shrink:0}
 .level-pending .repair-level-note{color:#a05f10}
 .repair-level-control{display:inline-flex;gap:2px;padding:3px;border:1px solid var(--line);border-radius:8px;background:var(--paper)}
 .repair-level-control button{padding:4px 12px;border:0;border-radius:5px;background:transparent;color:var(--ink-soft);font-size:11px;white-space:nowrap}
