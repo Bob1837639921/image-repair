@@ -1,0 +1,10 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>画心</title>
+<style>
+*{box-sizing:border-box}body{margin:0;height:100vh;display:grid;place-items:center;background:#f6f2e9;color:#303d39;font-family:"Segoe UI","Microsoft YaHei",sans-serif;overflow:hidden}
+body:before{content:"";position:absolute;inset:0;background:radial-gradient(ellipse at 50% 40%,#fffdf7,transparent 65%);pointer-events:none}
+main{position:relative;text-align:center;animation:appear .55s ease-out}svg{width:96px;height:96px;filter:drop-shadow(0 12px 22px #863b2520)}
+h1{font:500 33px "Microsoft YaHei",serif;letter-spacing:12px;margin:22px 0 9px;padding-left:12px}small{font-size:10px;color:#988b79;letter-spacing:4px}p{font-size:13px;color:#847768;margin:36px 0 18px}
+.track{height:3px;width:160px;background:#e5dacc;border-radius:9px;margin:auto;overflow:hidden}.track:after{content:"";display:block;width:45%;height:100%;background:#a43b2d;border-radius:9px;animation:move 1.25s ease-in-out infinite}
+footer{position:absolute;bottom:34px;color:#9a8c7b;font-size:11px;letter-spacing:2px}button{margin-top:20px;border:1px solid #bda58e;border-radius:8px;padding:8px 18px;background:#fffaf1;color:#8e382b;cursor:pointer}
+@keyframes move{from{transform:translateX(-110%)}to{transform:translateX(330%)}}@keyframes appear{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}@media(prefers-reduced-motion:reduce){main{animation:none}.track:after{animation:none}}
+</style><main>__ICON__<h1>画心</h1><small>SCROLL STUDIO</small><p id="status" role="status">正在准备书画工作台…</p><div class="track" id="loading"></div><button id="retry" hidden onclick="location.reload()">重新加载</button></main><footer>整理画面 · 留住笔墨</footer></html>

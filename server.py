@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import sys
 import secrets
 import shutil
 import threading
@@ -19,7 +20,8 @@ from repair_batch import RepairBatch
 from data_store import data_directory
 from storage_settings import StorageSettings,choose_directory
 
-ROOT=Path(__file__).resolve().parent
+ASSET_ROOT=Path(__file__).resolve().parent
+ROOT=Path(sys.executable).resolve().parent if getattr(sys,'frozen',False) else ASSET_ROOT
 DATA=data_directory(ROOT)
 DATA.mkdir(parents=True,exist_ok=True)
 (DATA/'originals').mkdir(exist_ok=True)
@@ -209,9 +211,9 @@ class Handler(BaseHTTPRequestHandler):
             if not self.allowed(): return self.respond({'error':'非法主机'},403)
             u=urlparse(self.path); q=parse_qs(u.query)
             if u.path=='/':
-                return self.respond((ROOT/'static/index.html').read_text('utf-8').replace('__TOKEN__',TOKEN).encode(),mime='text/html; charset=utf-8')
-            if u.path in ('/app.js','/style.css','/repair.js','/repair-batch.js','/settings.js','/repair-history.js'):
-                return self.respond((ROOT/'static'/u.path[1:]).read_bytes(),mime='text/javascript; charset=utf-8' if u.path.endswith('js') else 'text/css; charset=utf-8')
+                return self.respond((ASSET_ROOT/'static/index.html').read_text('utf-8').replace('__TOKEN__',TOKEN).encode(),mime='text/html; charset=utf-8')
+            if u.path in ('/app.js','/style.css','/repair.js','/repair-batch.js','/settings.js','/repair-history.js','/desktop.js'):
+                return self.respond((ASSET_ROOT/'static'/u.path[1:]).read_bytes(),mime='text/javascript; charset=utf-8' if u.path.endswith('js') else 'text/css; charset=utf-8')
             if u.path=='/api/settings/storage':return self.respond(STORAGE.status())
             if u.path=='/api/items':
                 with LOCK: return self.respond(ITEMS)
@@ -226,6 +228,8 @@ class Handler(BaseHTTPRequestHandler):
             if u.path.startswith('/api/repair/pending/'):
                 item=find(u.path.rsplit('/',1)[1])
                 return self.respond(REPAIRS.pending(item) if item.get('confirmed') else None)
+            if u.path=='/app-icon.svg':
+                return self.respond((ASSET_ROOT/'static/app-icon.svg').read_bytes(),mime='image/svg+xml',cache='public, max-age=3600')
             if u.path.startswith('/api/repair/info/'):
                 item=find(u.path.rsplit('/',1)[1])
                 if not item.get('confirmed'):raise ValueError('请先确认裁剪')

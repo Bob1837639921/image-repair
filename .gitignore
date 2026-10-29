@@ -1,5 +1,6 @@
 data/
 data-location.txt
+desktop-window.json
 __pycache__/
 .venv/
 *.log

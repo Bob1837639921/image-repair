@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+<defs><linearGradient id="tile" x2=".8" y2="1"><stop stop-color="#bd5140"/><stop offset="1" stop-color="#812b26"/></linearGradient><linearGradient id="paper" x2=".8" y2="1"><stop stop-color="#fff8e9"/><stop offset="1" stop-color="#e5cfaa"/></linearGradient></defs>
+<rect x="8" y="8" width="240" height="240" rx="54" fill="url(#tile)"/>
+<rect x="17" y="17" width="222" height="222" rx="47" fill="none" stroke="#f3c59b" stroke-opacity=".24" stroke-width="1.5"/>
+<rect x="68" y="57" width="133" height="165" rx="14" fill="#4b1919" opacity=".2"/>
+<path d="M67 48H183V188Q183 205 200 205H80Q62 205 62 187V63Q62 48 77 48" fill="url(#paper)"/>
+<rect x="55" y="43" width="139" height="22" rx="11" fill="#f8e8c8"/>
+<path d="M64 60H184" stroke="#ccad7d" stroke-width="2"/>
+<path d="M183 183H196Q207 183 207 194Q207 205 196 205H84Q96 205 96 194Q96 183 84 183Z" fill="#e6cba0"/>
+<path d="M84 95Q119 86 159 92L156 100Q117 96 86 102Z M118 105L131 103L127 156L115 159Z M87 127Q120 116 155 123L153 131Q122 126 90 136Z M89 153Q118 156 155 143L164 150Q132 170 91 163Z" fill="#303d39"/>
+<rect x="151" y="161" width="17" height="17" rx="3" fill="#b74937"/><path d="M156 165V174M163 165V174M156 169H163" stroke="#f5dec0" stroke-width="1.4"/>
+</svg>

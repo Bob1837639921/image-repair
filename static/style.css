@@ -35,6 +35,15 @@ header{height:50px;display:flex;align-items:center;gap:10px;padding:0 18px;backg
 .brand{display:flex;align-items:center;gap:9px;font-family:var(--serif);font-size:19px;letter-spacing:1.5px;font-weight:700;color:var(--ink)}
 .seal{display:inline-grid;place-items:center;width:24px;height:24px;border-radius:4px;background:var(--accent);color:#fbf8f2;font-family:var(--serif);font-size:13px;font-weight:700;letter-spacing:0;box-shadow:inset 0 0 0 1px #ffffff40,0 1px 3px #a6382b33}
 .brand small{display:inline-block;margin-left:6px;font-family:var(--sans);font-size:9px;font-weight:500;letter-spacing:1.6px;color:var(--muted);vertical-align:middle}
+.brand-icon{display:block;width:30px;height:30px;flex:0 0 30px;filter:drop-shadow(0 2px 3px #742c2420)}
+.desktop-close-dialog{width:min(440px,calc(100vw - 40px));padding:24px 28px;border:1px solid #d8c8b3;border-radius:18px;background:#fbf7ef;color:#303d39;box-shadow:0 24px 90px #24180f40}
+.desktop-close-dialog::backdrop{background:#241e1955;backdrop-filter:blur(5px)}
+.desktop-close-top{display:flex;align-items:center;justify-content:space-between}.desktop-close-top img{width:48px;height:48px}.desktop-close-cancel{padding:0;width:28px;height:28px;font-size:20px;border:0;background:transparent;color:#8b7a67}
+.desktop-close-dialog h2{font-size:21px;margin:20px 0 12px}.desktop-close-dialog p{font-size:12px;line-height:1.9;color:#897a68}.desktop-remember{display:flex;align-items:center;gap:8px;margin:20px 0;font-size:12px}.desktop-remember input{width:15px;height:15px;accent-color:#a43b2d}
+.desktop-close-actions{display:grid;grid-template-columns:1fr 1.35fr;gap:10px}.desktop-close-actions button{padding:11px}.desktop-close-dialog small{display:block;margin-top:16px;font-size:11px;color:#9a8a76}
+.empty-app-icon{width:92px;height:92px;margin-bottom:18px;filter:drop-shadow(0 12px 15px #77352318)}
+.empty-kicker{font-size:10px;letter-spacing:2px;color:var(--muted)}
+@media(prefers-reduced-motion:no-preference){#empty:not([hidden]) .empty-app-icon{animation:brand-arrive .5s ease-out}@keyframes brand-arrive{from{opacity:0;transform:translateY(8px) scale(.96)}to{opacity:1;transform:none}}}
 .local,.side-foot,.eyebrow,#meta,.steps{display:none}
 #importTop{margin-left:auto;background:transparent;border-color:transparent}
 .header-imports{margin-left:auto;display:flex;align-items:center;gap:6px}
