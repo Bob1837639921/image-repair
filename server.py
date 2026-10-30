@@ -19,6 +19,7 @@ from repairing import RepairService, crop_signature
 from repair_batch import RepairBatch
 from data_store import data_directory
 from storage_settings import StorageSettings,choose_directory
+from recognition import RecognitionService,detail_boxes,crop_box
 
 ASSET_ROOT=Path(__file__).resolve().parent
 ROOT=Path(sys.executable).resolve().parent if getattr(sys,'frozen',False) else ASSET_ROOT
@@ -55,6 +56,14 @@ def source(item): return DATA/'originals'/item['file']
 
 REPAIRS=RepairService(DATA,find,source,LOCK,save,ITEMS)
 BATCH=RepairBatch(DATA,REPAIRS)
+
+
+def recognition_image(item):
+    # Read the original crop; restoration must not invent an inscription.
+    return render(source(item),item['points'],item['rotation'],trim=item.get('trim'))
+
+
+RECOGNITION=RecognitionService(find,recognition_image,lambda:(REPAIRS.key,REPAIRS.base_url,REPAIRS.model),LOCK,save,ITEMS)
 
 
 def import_image(name, content):
@@ -176,7 +185,7 @@ def activate_storage(folder):
         if JOB.get('folder') and Path(JOB['folder']).is_relative_to(previous):JOB['folder']=str(DATA/Path(JOB['folder']).relative_to(previous))
 
 
-STORAGE=StorageSettings(ROOT,DATA,activate_storage,lambda:JOB['running'] or PREPARE['running'] or BATCH.job['running'],environment_override=bool(os.environ.get('SCROLL_STUDIO_DATA','').strip()))
+STORAGE=StorageSettings(ROOT,DATA,activate_storage,lambda:JOB['running'] or PREPARE['running'] or BATCH.job['running'] or RECOGNITION.job['running'],environment_override=bool(os.environ.get('SCROLL_STUDIO_DATA','').strip()))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -212,9 +221,28 @@ class Handler(BaseHTTPRequestHandler):
             u=urlparse(self.path); q=parse_qs(u.query)
             if u.path=='/':
                 return self.respond((ASSET_ROOT/'static/index.html').read_text('utf-8').replace('__TOKEN__',TOKEN).encode(),mime='text/html; charset=utf-8')
-            if u.path in ('/app.js','/style.css','/repair.js','/repair-batch.js','/settings.js','/repair-history.js','/desktop.js'):
+            if u.path in ('/app.js','/style.css','/repair.js','/repair-batch.js','/settings.js','/repair-history.js','/desktop.js','/recognition.js','/recognition.css'):
                 return self.respond((ASSET_ROOT/'static'/u.path[1:]).read_bytes(),mime='text/javascript; charset=utf-8' if u.path.endswith('js') else 'text/css; charset=utf-8')
             if u.path=='/api/settings/storage':return self.respond(STORAGE.status())
+            if u.path.startswith('/api/recognition/status/'):
+                return self.respond(RECOGNITION.status(u.path.rsplit('/',1)[1]))
+            if u.path.startswith('/api/recognition/image/'):
+                item=find(u.path.rsplit('/',1)[1])
+                if q.get('signature',[None])[0]!=crop_signature(item):raise ValueError('作品裁剪已变化，请重新打开识别窗口')
+                part=q.get('part',['overview'])[0]
+                with recognition_image(item) as full:
+                    box=None
+                    if part in ('0','1','2','3'):box=detail_boxes(full.size)[int(part)]
+                    elif part=='signature':
+                        candidate=item.get('recognition_candidate') or {}
+                        if candidate.get('signature')!=crop_signature(item):raise ValueError('落款定位已过期')
+                        box=candidate.get('result',{}).get('signature_region')
+                        if not box:raise ValueError('本次未定位到落款区域')
+                    elif part!='overview':raise ValueError('未知识别视图')
+                    image=crop_box(full,box) if box else full.copy()
+                    with image:
+                        image.thumbnail((2400,2400));output=io.BytesIO();image.save(output,'JPEG',quality=94,subsampling=0)
+                return self.respond(output.getvalue(),mime='image/jpeg')
             if u.path=='/api/items':
                 with LOCK: return self.respond(ITEMS)
             if u.path=='/api/job':
@@ -262,6 +290,8 @@ class Handler(BaseHTTPRequestHandler):
                 name=parse_qs(u.query).get('name',['image.jpg'])[0]
                 return self.respond(import_image(name,raw))
             body=json.loads(raw or b'{}')
+            if u.path=='/api/recognition/start':return self.respond(RECOGNITION.start(body['id'],body.get('signature')))
+            if u.path=='/api/recognition/adopt':return self.respond(RECOGNITION.adopt(body['id'],body.get('token'),body.get('signature'),body.get('fields')))
             if u.path=='/api/settings/storage':return self.respond(STORAGE.start(body.get('path')))
             if u.path=='/api/settings/choose-folder':return self.respond(dict(path=choose_directory()))
             if u.path=='/api/repair/batch-start':return self.respond(BATCH.start(body.get('ids'),body.get('workers',2)))

@@ -132,7 +132,7 @@ def main():
             app=lifecycle['app']
             if lifecycle['starting']:return False
             if app is None:return True
-            if app.JOB['running'] or app.BATCH.job['running'] or app.STORAGE.status()['running'] or app.STORAGE.active:
+            if app.JOB['running'] or app.BATCH.job['running'] or app.RECOGNITION.job['running'] or app.STORAGE.status()['running'] or app.STORAGE.active:
                 ctypes.windll.user32.MessageBoxW(None,'图片处理或文件保存仍在进行，请等待完成后关闭。','画心',64)
                 return False
             return True
