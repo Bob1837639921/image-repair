@@ -105,11 +105,15 @@ class RecognitionTests(unittest.TestCase):
                 request=urllib.request.Request(url+'/api/'+path,data=json.dumps(body).encode(),headers={'X-App-Token':app.TOKEN},method='POST')
                 return json.load(urllib.request.urlopen(request))
             try:
+                with self.assertRaises(OSError):app.ThreadingHTTPServer(('127.0.0.1',http.server_port),app.Handler)
                 image=io.BytesIO();Image.new('RGB',(100,500),'ivory').save(image,'PNG')
                 item=app.import_image('original.png',image.getvalue());signature=crop_signature(item)
                 with urllib.request.urlopen(url+'/api/recognition/image/'+item['id']+'?part=2&signature='+signature) as response:
                     self.assertEqual(response.headers['Content-Type'],'image/jpeg')
                     with Image.open(io.BytesIO(response.read())) as detail:self.assertLess(detail.height,500)
+                with urllib.request.urlopen(url+'/api/recognition/image/'+item['id']+'?part=overview&detail=1&signature='+signature) as response:
+                    self.assertEqual(response.headers['Content-Type'],'image/png')
+                    with Image.open(io.BytesIO(response.read())) as detail:self.assertEqual(detail.size,(100,500))
                 post('recognition/start',dict(id=item['id'],signature=signature));self.wait(app.RECOGNITION)
                 status=json.load(urllib.request.urlopen(url+'/api/recognition/status/'+item['id']))
                 result=post('recognition/adopt',dict(id=item['id'],signature=signature,token=status['candidate']['token'],fields=dict(title='春晓')))

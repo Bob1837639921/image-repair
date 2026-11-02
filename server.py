@@ -2,6 +2,7 @@ import io
 import json
 import os
 import sys
+import socket
 import secrets
 import shutil
 import threading
@@ -10,7 +11,7 @@ import uuid
 import webbrowser
 import numpy as np
 from datetime import datetime
-from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer as BaseThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote
 
@@ -20,6 +21,16 @@ from repair_batch import RepairBatch
 from data_store import data_directory
 from storage_settings import StorageSettings,choose_directory
 from recognition import RecognitionService,detail_boxes,crop_box
+
+
+class ThreadingHTTPServer(BaseThreadingHTTPServer):
+    # SO_REUSEADDR on Windows allows two independent workbenches to bind one
+    # port and intermittently serve different in-memory copies of the library.
+    allow_reuse_address=os.name!='nt'
+
+    def server_bind(self):
+        if os.name=='nt':self.socket.setsockopt(socket.SOL_SOCKET,socket.SO_EXCLUSIVEADDRUSE,1)
+        super().server_bind()
 
 ASSET_ROOT=Path(__file__).resolve().parent
 ROOT=Path(sys.executable).resolve().parent if getattr(sys,'frozen',False) else ASSET_ROOT
@@ -221,7 +232,7 @@ class Handler(BaseHTTPRequestHandler):
             u=urlparse(self.path); q=parse_qs(u.query)
             if u.path=='/':
                 return self.respond((ASSET_ROOT/'static/index.html').read_text('utf-8').replace('__TOKEN__',TOKEN).encode(),mime='text/html; charset=utf-8')
-            if u.path in ('/app.js','/style.css','/repair.js','/repair-batch.js','/settings.js','/repair-history.js','/desktop.js','/recognition.js','/recognition.css'):
+            if u.path in ('/app.js','/style.css','/repair.js','/repair-batch.js','/settings.js','/repair-history.js','/desktop.js','/recognition.js','/recognition-viewer.js','/recognition.css'):
                 return self.respond((ASSET_ROOT/'static'/u.path[1:]).read_bytes(),mime='text/javascript; charset=utf-8' if u.path.endswith('js') else 'text/css; charset=utf-8')
             if u.path=='/api/settings/storage':return self.respond(STORAGE.status())
             if u.path.startswith('/api/recognition/status/'):
@@ -241,8 +252,10 @@ class Handler(BaseHTTPRequestHandler):
                     elif part!='overview':raise ValueError('未知识别视图')
                     image=crop_box(full,box) if box else full.copy()
                     with image:
-                        image.thumbnail((2400,2400));output=io.BytesIO();image.save(output,'JPEG',quality=94,subsampling=0)
-                return self.respond(output.getvalue(),mime='image/jpeg')
+                        detail=q.get('detail')==['1'];output=io.BytesIO()
+                        if detail:image.save(output,'PNG')
+                        else:image.thumbnail((2400,2400));image.save(output,'JPEG',quality=94,subsampling=0)
+                return self.respond(output.getvalue(),mime='image/png' if detail else 'image/jpeg')
             if u.path=='/api/items':
                 with LOCK: return self.respond(ITEMS)
             if u.path=='/api/job':

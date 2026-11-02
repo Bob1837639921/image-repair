@@ -105,7 +105,19 @@ async function importFiles(files){
  }
 }
 for(const id of ['importTop','importFiles','importEmpty'])$(id).onclick=()=>$('fileInput').click();$('importFolder').onclick=()=>$('folderInput').click();for(const id of ['fileInput','folderInput'])$(id).onchange=e=>{importFiles(e.target.files);e.target.value=''};
-document.addEventListener('dragover',e=>{e.preventDefault();document.body.classList.add('dragging')});document.addEventListener('dragleave',e=>{if(!e.relatedTarget)document.body.classList.remove('dragging')});document.addEventListener('drop',e=>{e.preventDefault();document.body.classList.remove('dragging');importFiles(e.dataTransfer.files)});
+let internalImageDrag=false;
+function internalPreviewDrop(event){
+ if(internalImageDrag||document.querySelector('dialog[open]'))return true;
+ const transfer=event.dataTransfer;if(!transfer)return true;
+ // Browsers can expose an internally dragged image as a File as well as a URL.
+ const uri=transfer.getData('text/uri-list')||transfer.getData('text/plain')||'';
+ return uri.split(/\r?\n/).some(line=>{try{const url=new URL(line.trim(),location.href);return url.origin===location.origin&&/^\/api\/(recognition\/image|repair\/image|image)\//.test(url.pathname)}catch{return false}});
+}
+document.addEventListener('dragstart',event=>{if(event.target?.closest?.('img,svg,canvas')){internalImageDrag=true;event.preventDefault();document.body.classList.remove('dragging');queueMicrotask(()=>{internalImageDrag=false})}});
+document.addEventListener('dragend',()=>{internalImageDrag=false;document.body.classList.remove('dragging')});
+document.addEventListener('dragover',event=>{event.preventDefault();const files=Array.from(event.dataTransfer?.types||[]).includes('Files');document.body.classList.toggle('dragging',files&&!internalPreviewDrop(event));if(internalPreviewDrop(event)&&event.dataTransfer)event.dataTransfer.dropEffect='none'});
+document.addEventListener('dragleave',event=>{if(!event.relatedTarget)document.body.classList.remove('dragging')});
+document.addEventListener('drop',event=>{event.preventDefault();document.body.classList.remove('dragging');const blocked=internalPreviewDrop(event);internalImageDrag=false;if(blocked)return;if(event.dataTransfer?.files?.length)importFiles(event.dataTransfer.files)});
 $('search').oninput=drawList;$('filter').onchange=drawList;$('original').onload=fit;new ResizeObserver(fit).observe($('originalPane'));$('zoom').onchange=fit;
 $('result').onload=fitResult;new ResizeObserver(fitResult).observe($('resultPane'));
 function setViewMode(value){compare=value;$('resultPane').hidden=!value;$('editTab').classList.toggle('active',!value);$('compareTab').classList.toggle('active',value);$('editTab').setAttribute('aria-pressed',String(!value));$('compareTab').setAttribute('aria-pressed',String(value));document.querySelector('.workspace').classList.toggle('comparing',value);fit();if(value)preview()}

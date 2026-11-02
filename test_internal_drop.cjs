@@ -1,0 +1,13 @@
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+const source=fs.readFileSync(__dirname+'/static/app.js','utf8'),listeners={},imports=[],microtasks=[];let modal=false;
+const classes=new Set();
+const ctx=vm.createContext({URL,queueMicrotask:fn=>microtasks.push(fn),location:{href:'http://127.0.0.1:8765/',origin:'http://127.0.0.1:8765'},document:{querySelector:()=>modal?{}:null,body:{classList:{remove:n=>classes.delete(n),toggle(n,b){b?classes.add(n):classes.delete(n)}}},addEventListener:(name,fn)=>listeners[name]=fn},importFiles:files=>imports.push(files)});
+vm.runInContext(source.slice(source.indexOf('let internalImageDrag='),source.indexOf("$('search').oninput=")),ctx);
+const file={name:'preview.jpg'},drop=(uri='')=>({preventDefault(){this.prevented=true},dataTransfer:{files:[file],types:['Files'],getData:type=>type==='text/uri-list'?uri:''}});
+for(const path of ['/api/recognition/image/source?part=signature','/api/image/source?mode=detail','/api/repair/image/source'])listeners.drop(drop('http://127.0.0.1:8765'+path));
+assert.equal(imports.length,0,'internal image URLs are never imported as works');
+modal=true;listeners.drop(drop());assert.equal(imports.length,0,'dialogs never act as library import targets');
+modal=false;let prevented=false;listeners.dragstart({target:{closest:()=>({})},preventDefault(){prevented=true}});assert.ok(prevented);listeners.drop(drop());assert.equal(imports.length,0,'internal drag remains blocked even when browser only provides a File');
+microtasks.forEach(fn=>fn());listeners.drop(drop());assert.equal(imports.length,1,'external local file drops still import even if a cancelled drag had no dragend');
+listeners.dragover(drop());assert.ok(classes.has('dragging'));modal=true;listeners.dragover(drop());assert.ok(!classes.has('dragging'));
+console.log('PASS: internal preview and modal drops blocked; ordinary external file import retained');
