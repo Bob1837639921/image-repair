@@ -34,7 +34,7 @@ class RecognitionViewer {
    this.stage.style.width=Math.max(w,this.width+32)+'px';this.stage.style.height=Math.max(h,this.height+32)+'px';
    Object.assign(this.image.style,{width:this.width+'px',height:this.height+'px',left:this.left+'px',top:this.top+'px'});
   }
-  this.sync();
+  this.sync();this.onRender?.();
  }
  center(u=.5,v=.5){this.view.scrollLeft=Math.max(0,Math.min(this.view.scrollWidth-this.view.clientWidth,this.left+u*this.width-this.view.clientWidth/2));this.view.scrollTop=Math.max(0,Math.min(this.view.scrollHeight-this.view.clientHeight,this.top+v*this.height-this.view.clientHeight/2))}
  zoom(value,point){

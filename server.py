@@ -21,6 +21,8 @@ from repair_batch import RepairBatch
 from data_store import data_directory
 from storage_settings import StorageSettings,choose_directory
 from recognition import RecognitionService,detail_boxes,crop_box
+from author_roster import parse_word_names,identify_word_authors
+from recognition import recognition_options
 
 
 class ThreadingHTTPServer(BaseThreadingHTTPServer):
@@ -232,9 +234,12 @@ class Handler(BaseHTTPRequestHandler):
             u=urlparse(self.path); q=parse_qs(u.query)
             if u.path=='/':
                 return self.respond((ASSET_ROOT/'static/index.html').read_text('utf-8').replace('__TOKEN__',TOKEN).encode(),mime='text/html; charset=utf-8')
-            if u.path in ('/app.js','/style.css','/repair.js','/repair-batch.js','/settings.js','/repair-history.js','/desktop.js','/recognition.js','/recognition-viewer.js','/recognition.css'):
+            if u.path in ('/app.js','/style.css','/repair.js','/repair-batch.js','/settings.js','/repair-history.js','/desktop.js','/recognition.js','/recognition-viewer.js','/recognition.css','/author-roster.js'):
                 return self.respond((ASSET_ROOT/'static'/u.path[1:]).read_bytes(),mime='text/javascript; charset=utf-8' if u.path.endswith('js') else 'text/css; charset=utf-8')
             if u.path=='/api/settings/storage':return self.respond(STORAGE.status())
+            if u.path=='/api/settings/authors':
+                path=DATA/'author-roster.json'
+                return self.respond(json.loads(path.read_text('utf-8')) if path.exists() else dict(source='',authors=[]))
             if u.path.startswith('/api/recognition/status/'):
                 return self.respond(RECOGNITION.status(u.path.rsplit('/',1)[1]))
             if u.path.startswith('/api/recognition/image/'):
@@ -302,8 +307,21 @@ class Handler(BaseHTTPRequestHandler):
             if u.path=='/api/import':
                 name=parse_qs(u.query).get('name',['image.jpg'])[0]
                 return self.respond(import_image(name,raw))
+            if u.path=='/api/settings/authors/preview':
+                name=Path(parse_qs(u.query).get('name',['名单.docx'])[0].replace('\\','/')).name
+                return self.respond(identify_word_authors(parse_word_names(name,raw),(REPAIRS.key,REPAIRS.base_url,REPAIRS.model)))
             body=json.loads(raw or b'{}')
-            if u.path=='/api/recognition/start':return self.respond(RECOGNITION.start(body['id'],body.get('signature')))
+            if u.path=='/api/settings/authors':
+                authors=recognition_options(dict(authors=body.get('authors',[])))['authors']
+                roster=dict(source=str(body.get('source') or '手动名单')[:200],authors=authors)
+                with LOCK:
+                    temp=DATA/'author-roster.tmp';temp.write_text(json.dumps(roster,ensure_ascii=False),'utf-8');temp.replace(DATA/'author-roster.json')
+                return self.respond(roster)
+            if u.path=='/api/recognition/start':
+                options=recognition_options(body.get('options'))
+                path=DATA/'author-roster.json'
+                options['authors']=json.loads(path.read_text('utf-8')).get('authors',[]) if path.exists() else []
+                return self.respond(RECOGNITION.start(body['id'],body.get('signature'),options))
             if u.path=='/api/recognition/adopt':return self.respond(RECOGNITION.adopt(body['id'],body.get('token'),body.get('signature'),body.get('fields')))
             if u.path=='/api/settings/storage':return self.respond(STORAGE.start(body.get('path')))
             if u.path=='/api/settings/choose-folder':return self.respond(dict(path=choose_directory()))
