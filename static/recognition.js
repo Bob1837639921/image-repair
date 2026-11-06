@@ -52,6 +52,15 @@
    el('recognitionAuthorStatus').textContent=labels[r.author_status];el('recognitionTitleStatus').textContent=labels[r.title_status];
    for(const [id,key] of [['recognitionInscription','inscription'],['recognitionAuthorEvidence','author_evidence'],['recognitionExcerpt','body_excerpt'],['recognitionTitleEvidence','title_evidence'],['recognitionNotes','notes']])el(id).textContent=r[key]||'未能辨认';
    const matches=el('recognitionRosterMatches');matches.replaceChildren();
+   if(r.work_matches?.length){
+    const h=document.createElement('h3');h.textContent='按画面正文匹配的 Word 作品 · 需核对';matches.append(h);
+    for(const work of r.work_matches){
+     const b=document.createElement('button');b.type='button';b.textContent=work.name+' · '+work.title;b.disabled=value.job.running;
+     b.onclick=()=>{el('recognitionCalligrapher').value=work.name;el('recognitionWorkTitle').value=work.title;dirty=true;syncAdopt();el('recognitionReviewBadge').textContent='已选 Word 记录，待保存'};
+     matches.append(b);
+    }
+   }
+   if(r.catalogue_match){const p=document.createElement('p');p.textContent=(r.catalogue_match.status==='clear'?'画面与 Word 已匹配：':'画面与 Word 待核对：')+r.catalogue_match.evidence;matches.append(p)}
    const match=r.roster_match;
    if(match&&match.status!=='none'){
     const h=document.createElement('h3');h.textContent=({exact:'与本次识读名单完全匹配',review:'本次名单近似候选 · 需人工确认',unmatched:'未匹配本次名单 · 可手动填写'})[match.status];matches.append(h);

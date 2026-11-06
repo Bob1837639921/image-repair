@@ -11,7 +11,7 @@ from pathlib import Path
 from copy import deepcopy
 from unittest.mock import patch
 from PIL import Image
-from recognition import RecognitionService,read_artwork,validate_result,detail_boxes,merge_author_readings,recognition_options,match_roster
+from recognition import RecognitionService,read_artwork,validate_result,detail_boxes,merge_author_readings,recognition_options,match_roster,read_with_catalogue
 from repairing import crop_signature
 
 
@@ -61,6 +61,29 @@ class RecognitionTests(unittest.TestCase):
         self.assertEqual(fuzzy['roster_match']['status'],'review')
         self.assertEqual(fuzzy['roster_match']['names'],['娄梅芬'])
         self.assertEqual(match_roster(original,['王先生'])['roster_match']['status'],'unmatched')
+
+    def test_word_title_provides_review_candidate_without_overwriting_signature(self):
+        result=validate_result(reading(calligrapher='另一作者',title='青玉案·元夕'))
+        work=dict(name='楼红燕',title='辛弃疾《青玉案·元夕》')
+        matched=match_roster(result,['楼红燕'],[work])
+        self.assertEqual(matched['work_matches'],[work])
+        self.assertEqual(matched['calligrapher'],'另一作者')
+
+    def test_partial_body_can_retrieve_word_candidate(self):
+        result=validate_result(reading(calligrapher='',body_excerpt='躬耕墨海未嘗休……丹心向黨寫春秋'))
+        work=dict(name='章百成',title='躬耕墨海未曾休')
+        self.assertEqual(match_roster(result,['章百成'],[work])['work_matches'],[work])
+
+    def test_catalogue_match_requires_valid_record_and_evidence(self):
+        works=[dict(name='章百成',title='躬耕墨海未曾休')]
+        options=dict(authors=['章百成'],works=works)
+        raw=reading(catalogue_record=0,match_status='clear',match_basis='text',match_evidence='正文首句躬耕墨海未曾休')
+        with patch('recognition.request_json',return_value=raw):result=read_with_catalogue([],('key','url','model'),options)
+        self.assertEqual(result['calligrapher'],'章百成')
+        self.assertEqual(result['catalogue_match']['status'],'clear')
+        for record in (True,-1,99,None):
+            with patch('recognition.request_json',return_value=dict(raw,catalogue_record=record)):
+                self.assertIsNone(read_with_catalogue([],('key','url','model'),options)['catalogue_match'])
 
     def test_options_validate_coordinates_and_names(self):
         self.assertEqual(recognition_options({'authors':[' 张三 ','张三']})['authors'],['张三'])

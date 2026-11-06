@@ -313,14 +313,18 @@ class Handler(BaseHTTPRequestHandler):
             body=json.loads(raw or b'{}')
             if u.path=='/api/settings/authors':
                 authors=recognition_options(dict(authors=body.get('authors',[])))['authors']
-                roster=dict(source=str(body.get('source') or '手动名单')[:200],authors=authors)
+                works=body.get('works',[])
+                if not isinstance(works,list) or len(works)>500:raise ValueError('作品名单格式不正确')
+                works=[dict(name=w['name'],title=w['title'][:300]) for w in works if isinstance(w,dict) and w.get('name') in authors and isinstance(w.get('title'),str) and w['title'].strip()]
+                roster=dict(source=str(body.get('source') or '手动名单')[:200],authors=authors,works=works)
                 with LOCK:
                     temp=DATA/'author-roster.tmp';temp.write_text(json.dumps(roster,ensure_ascii=False),'utf-8');temp.replace(DATA/'author-roster.json')
                 return self.respond(roster)
             if u.path=='/api/recognition/start':
                 options=recognition_options(body.get('options'))
                 path=DATA/'author-roster.json'
-                options['authors']=json.loads(path.read_text('utf-8')).get('authors',[]) if path.exists() else []
+                roster=json.loads(path.read_text('utf-8')) if path.exists() else {}
+                options.update(authors=roster.get('authors',[]),works=roster.get('works',[]))
                 return self.respond(RECOGNITION.start(body['id'],body.get('signature'),options))
             if u.path=='/api/recognition/adopt':return self.respond(RECOGNITION.adopt(body['id'],body.get('token'),body.get('signature'),body.get('fields')))
             if u.path=='/api/settings/storage':return self.respond(STORAGE.start(body.get('path')))
